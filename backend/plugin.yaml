@@ -1,0 +1,5 @@
+name: ollama-usage-monitor
+version: "1.1.0"
+description: "Ollama Cloud usage monitor backend — serves session/weekly quotas + per-model request counts to the desktop plugin (statusbar chip + pane)."
+author: kosello
+kind: backend
