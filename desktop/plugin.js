@@ -234,45 +234,11 @@ function UsagePane({ ctx }) {
     }
   }
 
-  // Weekly history — last 8 weeks with trend vs previous week
-  const weeks = hist?.weeks || []
-  if (weeks.length > 0) {
-    const arrow = trendArrow(weeks)
-    rows.push(jsxs('div', {
-      className: 'mt-3 border-t border-(--ui-stroke-secondary) pt-2 text-xs',
-      children: [
-        jsx('div', { className: 'font-medium text-(--ui-text-secondary) mb-1', children: 'Weekly history' }),
-        jsx('div', {
-          className: 'flex flex-col gap-0.5 tabular-nums',
-          children: weeks.map((w, i) => {
-            const pct = w.weekly_used_pct
-            const isCur = i === 0
-            return jsxs('div', {
-              className: 'flex items-center justify-between gap-2',
-              children: [
-                jsxs('span', { className: 'truncate', children: [
-                  w.week,
-                  isCur && arrow ? jsx('span', { className: 'ml-1', children: arrow }) : null
-                ]}),
-                jsxs('span', { className: 'shrink-0 text-(--ui-text-secondary)', children: [
-                  pct != null ? `${pct.toFixed(1)}%` : '?',
-                  ' · $', String(w.est_cost_consumed != null ? w.est_cost_consumed.toFixed(2) : '?'),
-                  w.top_model ? ` · ${w.top_model}` : ''
-                ]})
-              ]
-            }, w.week + i)
-          })
-        }),
-        jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: 'Weekly snapshots — kept locally, survives Ollama resets' })
-      ]
-    }))
-  }
-
-  // Real API price comparison — at the complete bottom
+  // Real API price comparison — section 1: $ detail (per model $/wk + $/req)
   if (data && data.ok !== false && data.api_weekly_total != null && data.weekly_models && data.weekly_models.length > 0) {
     const known = data.weekly_models.filter(m => m.api_cost_per_req != null)
     rows.push(jsx(Collapsible, {
-      title: 'vs. real API prices',
+      title: 'Real API prices',
       defaultOpen: false,
       children: [
         known.map(m =>
@@ -281,9 +247,9 @@ function UsagePane({ ctx }) {
             children: [
               jsx('span', { className: 'truncate', children: m.model }),
               jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0', children: [
-                m.api_cost_pct != null ? `${m.api_cost_pct.toFixed(0)}% of API` : '?',
-                ' · $', String(m.api_weekly_cost != null ? m.api_weekly_cost.toFixed(2) : '?'),
-                '/wk'
+                '$', String(m.api_weekly_cost != null ? m.api_weekly_cost.toFixed(2) : '?'),
+                '/wk · $', String(m.api_cost_per_req != null ? m.api_cost_per_req.toFixed(4) : '?'),
+                '/req'
               ]})
             ]
           }, m.model)
@@ -294,12 +260,68 @@ function UsagePane({ ctx }) {
             jsx('span', { children: 'API total this week' }),
             jsxs('span', { children: [
               '$', String(data.api_weekly_total.toFixed(2)),
-              ' · Ollama $', String((data.est_cost_consumed ?? 0).toFixed(2)),
-              data.api_total_pct != null ? ` (${data.api_total_pct.toFixed(0)}%)` : ''
+              ' · Ollama $', String((data.est_cost_consumed ?? 0).toFixed(2))
             ]})
           ]
         }),
         jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: `Rough: assumes ${data.api_assumption || '~1000 in + 500 out tokens/req'}` })
+      ]
+    }))
+
+    // Section 2: % comparison — Ollama cost as % of real API price
+    rows.push(jsx(Collapsible, {
+      title: 'Ollama vs API %',
+      defaultOpen: false,
+      children: [
+        known.map(m =>
+          jsxs('div', {
+            className: 'flex items-center justify-between gap-2 tabular-nums',
+            children: [
+              jsx('span', { className: 'truncate', children: m.model }),
+              jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0', children: [
+                m.api_cost_pct != null ? `${m.api_cost_pct.toFixed(0)}% of API` : '?'
+              ]})
+            ]
+          }, m.model)
+        ),
+        jsxs('div', {
+          className: 'flex items-center justify-between gap-2 border-t border-(--ui-stroke-secondary) pt-1 mt-1 font-medium',
+          children: [
+            jsx('span', { children: 'Ollama overall' }),
+            jsx('span', { children: data.api_total_pct != null ? `${data.api_total_pct.toFixed(0)}% of API total` : '?' })
+          ]
+        })
+      ]
+    }))
+  }
+
+  // Weekly history — collapsible, at the bottom (survives Ollama resets)
+  const weeks = hist?.weeks || []
+  if (weeks.length > 0) {
+    const arrow = trendArrow(weeks)
+    rows.push(jsx(Collapsible, {
+      title: 'Weekly history',
+      defaultOpen: false,
+      children: [
+        weeks.map((w, i) => {
+          const pct = w.weekly_used_pct
+          const isCur = i === 0
+          return jsxs('div', {
+            className: 'flex items-center justify-between gap-2 tabular-nums',
+            children: [
+              jsxs('span', { className: 'truncate', children: [
+                w.week,
+                isCur && arrow ? jsx('span', { className: 'ml-1', children: arrow }) : null
+              ]}),
+              jsxs('span', { className: 'shrink-0 text-(--ui-text-secondary)', children: [
+                pct != null ? `${pct.toFixed(1)}%` : '?',
+                ' · $', String(w.est_cost_consumed != null ? w.est_cost_consumed.toFixed(2) : '?'),
+                w.top_model ? ` · ${w.top_model}` : ''
+              ]})
+            ]
+          }, w.week + i)
+        }),
+        jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: 'Weekly snapshots — kept locally, survives Ollama resets' })
       ]
     }))
   }
