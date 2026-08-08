@@ -313,17 +313,41 @@ def _parse_usage(html: str) -> dict:
             seg["api_weekly_cost"] = round(per_req * seg["requests"], 4)
             api_weekly_total += seg["api_weekly_cost"]
             if per_req > 0:
-                # Ollama's cost per request as % of the real API price.
                 seg["api_cost_pct"] = round(seg["est_cost_per_req"] / per_req * 100.0, 1)
             else:
                 seg["api_cost_pct"] = None
+            # Cache + token volume info for new sections
+            seg["avg_in_tokens"] = in_t if avg else None
+            seg["avg_cache_tokens"] = cache_t if avg else None
+            seg["avg_out_tokens"] = out_t if avg else None
+            seg["cache_hit_pct"] = round(cache_t / in_t * 100.0, 1) if (avg and in_t > 0) else None
+            seg["total_in_tokens"] = round(in_t * seg["requests"]) if avg else None
+            seg["total_out_tokens"] = round(out_t * seg["requests"]) if avg else None
+            # Cost split
+            if avg:
+                seg["api_input_cost"] = round((miss_in / 1e6) * p_in * seg["requests"], 4)
+                seg["api_cache_cost"] = round((cache_t / 1e6) * p_cache * seg["requests"], 4)
+                seg["api_output_cost"] = round((out_t / 1e6) * p_out * seg["requests"], 4)
         else:
             seg["api_cost_per_req"] = None
             seg["api_weekly_cost"] = None
             seg["api_cost_pct"] = None
+            seg["cache_hit_pct"] = None
+            seg["total_in_tokens"] = None
+            seg["total_out_tokens"] = None
+            seg["api_input_cost"] = None
+            seg["api_cache_cost"] = None
+            seg["api_output_cost"] = None
     result["api_weekly_total"] = round(api_weekly_total, 4)
     result["api_assumption"] = _api_assumption_text(token_avgs)
     result["api_total_pct"] = (
+        round(cost_consumed / api_weekly_total * 100.0, 1) if api_weekly_total > 0 else None
+    )
+    # Savings + break-even + monthly projection
+    result["api_savings"] = round(api_weekly_total - cost_consumed, 2) if api_weekly_total > 0 else None
+    result["api_monthly_proj"] = round(api_weekly_total * 4.33, 2) if api_weekly_total > 0 else None
+    result["ollama_monthly"] = 20.0  # Pro plan
+    result["break_even_pct"] = (
         round(cost_consumed / api_weekly_total * 100.0, 1) if api_weekly_total > 0 else None
     )
 
