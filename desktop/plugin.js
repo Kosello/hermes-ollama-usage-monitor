@@ -264,7 +264,7 @@ function UsagePane({ ctx }) {
             ]})
           ]
         }),
-        jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: `Rough: assumes ${data.api_assumption || '~1000 in + 500 out tokens/req'}` })
+        jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: `Assumes ${data.api_assumption || '~1000 in + 500 out tokens/req'}` })
       ]
     }))
 

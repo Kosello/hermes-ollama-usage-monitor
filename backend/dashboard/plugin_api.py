@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import subprocess
 import time
 import urllib.request
@@ -255,30 +256,57 @@ def _parse_usage(html: str) -> dict:
 
     # ── Real API price comparison ─────────────────────────────────────────
     # Official API list prices per 1M tokens (input/output), USD, Aug 2026:
-    #   glm-5.2            $1.40 / $4.40   (Z.ai official)
-    #   deepseek-v4-flash  $0.14 / $0.28   (DeepSeek)
-    #   deepseek-v4-pro    $1.74 / $3.48   (DeepSeek)
-    #   minimax-m3         $0.24 / $0.96   (MiniMax)
-    # We only know request counts, not token counts, so the comparison uses
-    # a fixed rough assumption: AVG_IN_TOKENS in + AVG_OUT_TOKENS out per
-    # request. Clearly a proxy — labeled as such in the pane.
-    AVG_IN_TOKENS = 1000
-    AVG_OUT_TOKENS = 500
+    #   glm-5.2            $1.40 / $4.40   (Z.ai official; cache-hit in $0.26)
+    #   deepseek-v4-flash  $0.14 / $0.28   (DeepSeek; cache-hit in $0.0028)
+    #   deepseek-v4-pro    $1.74 / $3.48   (DeepSeek; cache-hit in $0.0036)
+    #   minimax-m3         $0.24 / $0.96   (MiniMax; cache-hit in $0.06)
+    #   gemma4:31b         $0.30 / $0.90   (Gemma via Google)
+    # Token counts per request come from Hermes' own state.db — real
+    # per-model averages over the last 7 days (input/output/cache-read).
+    # Cache-hit input is billed at the discounted rate by all four providers.
     API_PRICES = {
-        "glm-5.2": (1.40, 4.40),
-        "deepseek-v4-flash:0731": (0.14, 0.28),
-        "deepseek-v4-flash": (0.14, 0.28),
-        "deepseek-v4-pro": (1.74, 3.48),
-        "minimax-m3": (0.24, 0.96),
-        "gemma4:31b": (0.30, 0.90),
+        "glm-5.2": (1.40, 4.40, 0.26),
+        "glm-5.2:cloud": (1.40, 4.40, 0.26),
+        "glm-5": (1.40, 4.40, 0.26),
+        "deepseek-v4-flash:0731": (0.14, 0.28, 0.0028),
+        "deepseek-v4-flash": (0.14, 0.28, 0.0028),
+        "deepseek-v4-pro": (1.74, 3.48, 0.0036),
+        "minimax-m3": (0.24, 0.96, 0.06),
+        "gemma4:31b": (0.30, 0.90, 0.30),
+        "kimi-k2.7-code": (0.95, 4.00, 0.19),
+        "kimi-k2.6": (0.95, 4.00, 0.16),
+        "gpt-5.5": (1.25, 10.00, 1.25),
     }
+
+    token_avgs = _real_token_averages()
+
+    # Fallback token averages for models with no state.db data: use the mean
+    # across all known models (still far better than the old 1000/500 guess).
+    fallback_avg = None
+    if token_avgs:
+        vals = list(token_avgs.values())
+        fallback_avg = (
+            round(sum(v[0] for v in vals) / len(vals)),
+            round(sum(v[1] for v in vals) / len(vals)),
+            round(sum(v[2] for v in vals) / len(vals)),
+        )
+
     api_weekly_total = 0.0
     for seg in weekly_segs:
         prices = API_PRICES.get(seg["model"])
         if prices:
-            p_in, p_out = prices
-            per_req = (AVG_IN_TOKENS / 1e6) * p_in + (AVG_OUT_TOKENS / 1e6) * p_out
-            seg["api_cost_per_req"] = round(per_req, 5)
+            p_in, p_out, p_cache = prices
+            avg = token_avgs.get(seg["model"]) or fallback_avg
+            if avg:
+                in_t, out_t, cache_t = avg
+                # Cache-aware: cache-read input at discounted rate, the rest
+                # of the input at full rate, output at output rate.
+                miss_in = max(in_t - cache_t, 0)
+                per_req = (miss_in / 1e6) * p_in + (cache_t / 1e6) * p_cache + (out_t / 1e6) * p_out
+            else:
+                # No state.db data at all — old rough assumption as last resort.
+                per_req = (1000 / 1e6) * p_in + (500 / 1e6) * p_out
+            seg["api_cost_per_req"] = round(per_req, 6)
             seg["api_weekly_cost"] = round(per_req * seg["requests"], 4)
             api_weekly_total += seg["api_weekly_cost"]
             if per_req > 0:
@@ -291,12 +319,54 @@ def _parse_usage(html: str) -> dict:
             seg["api_weekly_cost"] = None
             seg["api_cost_pct"] = None
     result["api_weekly_total"] = round(api_weekly_total, 4)
-    result["api_assumption"] = f"~{AVG_IN_TOKENS} in + {AVG_OUT_TOKENS} out tokens/req"
+    result["api_assumption"] = _api_assumption_text(token_avgs)
     result["api_total_pct"] = (
         round(cost_consumed / api_weekly_total * 100.0, 1) if api_weekly_total > 0 else None
     )
 
     return result
+
+
+def _real_token_averages() -> dict:
+    """Real per-model avg tokens/request from Hermes state.db (last 7 days).
+
+    Returns {model: (avg_input, avg_output, avg_cache_read)}. Empty dict when
+    the DB is unavailable — callers fall back to the fixed assumption.
+    """
+    try:
+        STATE_DB = Path.home() / ".hermes" / "state.db"
+        if not STATE_DB.exists():
+            return {}
+        conn = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = conn.execute(
+                """
+                SELECT model,
+                       ROUND(SUM(input_tokens)*1.0/SUM(api_call_count), 0),
+                       ROUND(SUM(output_tokens)*1.0/SUM(api_call_count), 0),
+                       ROUND(SUM(cache_read_tokens)*1.0/SUM(api_call_count), 0)
+                FROM sessions
+                WHERE billing_provider = 'ollama-cloud'
+                  AND api_call_count > 0
+                  AND input_tokens > 0
+                  AND started_at >= ?
+                GROUP BY model
+                """,
+                (time.time() - 7 * 86400,),
+            ).fetchall()
+            return {r[0]: (r[1], r[2], r[3]) for r in rows}
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return {}
+
+
+def _api_assumption_text(token_avgs: dict) -> str:
+    """Human-readable note describing how the API comparison was computed."""
+    if not token_avgs:
+        return "~1000 in + 500 out tokens/req (fallback — no state.db data)"
+    n = len(token_avgs)
+    return f"real token averages from Hermes state.db (last 7d, {n} models), cache-aware pricing"
 
 
 def _week_key(iso_str: str | None) -> str | None:

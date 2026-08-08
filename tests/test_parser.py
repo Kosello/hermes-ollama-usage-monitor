@@ -30,6 +30,9 @@ spec.loader.exec_module(mod)
 
 def main() -> int:
     html = FIXTURE.read_text()
+    # Deterministic: stub out state.db so the 1000/500 fallback is exercised
+    # regardless of the machine running the test (CI has no state.db).
+    mod._real_token_averages = lambda: {}
     data = mod._parse_usage(html)
 
     assert data["plan"] == "Pro", f"plan: {data['plan']}"
@@ -64,7 +67,7 @@ def main() -> int:
     assert by["glm-5.2"]["api_cost_per_req"] == 0.0036, by["glm-5.2"]["api_cost_per_req"]
     assert abs(by["glm-5.2"]["api_weekly_cost"] - 1.9944) < 0.001, by["glm-5.2"]["api_weekly_cost"]
     assert by["minimax-m3"]["api_cost_per_req"] == 0.00072, by["minimax-m3"]["api_cost_per_req"]
-    assert data["api_assumption"] == "~1000 in + 500 out tokens/req", data["api_assumption"]
+    assert data["api_assumption"].startswith("~1000 in + 500 out"), data["api_assumption"]
     # Ollama cost as % of API price — present and sane
     assert by["glm-5.2"]["api_cost_pct"] is not None, by["glm-5.2"]["api_cost_pct"]
     assert by["glm-5.2"]["api_cost_pct"] > 0, by["glm-5.2"]["api_cost_pct"]
