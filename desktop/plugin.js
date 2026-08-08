@@ -10,6 +10,7 @@
  */
 
 import { cn, haptic, host, PALETTE_AREA, Tip, useQuery, useQueryClient } from '@hermes/plugin-sdk'
+import { useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'ollama-usage-monitor'
@@ -51,6 +52,32 @@ function trendArrow(weeks) {
   if (cur > prev) return '↑'
   if (cur < prev) return '↓'
   return '→'
+}
+
+// ── collapsible section ───────────────────────────────────────────────────
+function Collapsible({ title, defaultOpen = false, children }) {
+  const [open, setOpen] = useState(defaultOpen)
+  return jsxs('div', {
+    className: 'mt-2',
+    children: [
+      jsx('button', {
+        type: 'button',
+        className: cn(
+          'flex w-full items-center justify-between gap-2 rounded px-1 py-0.5 text-left',
+          'font-medium text-xs text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)'
+        ),
+        onClick: () => {
+          haptic('tap')
+          setOpen(o => !o)
+        },
+        children: [
+          jsx('span', { className: 'truncate', children: title }),
+          jsx('span', { className: 'shrink-0 text-(--ui-text-quaternary) transition-transform', children: open ? '▾' : '▸' })
+        ]
+      }),
+      open ? jsx('div', { className: 'mt-1 flex flex-col gap-0.5 text-xs', children }) : null
+    ]
+  })
 }
 
 // ── statusbar chip ────────────────────────────────────────────────────────
@@ -150,56 +177,46 @@ function UsagePane({ ctx }) {
       ]
     }))
     if ((data.session_models && data.session_models.length > 0) || (data.weekly_models && data.weekly_models.length > 0)) {
-      const segTable = (title, segs, withCost) => {
+      const segRows = (segs, withCost) => {
         if (!segs || segs.length === 0) return null
-        return jsxs('div', {
-          className: 'mt-2',
-          children: [
-            jsx('div', { className: 'font-medium text-xs text-(--ui-text-secondary)', children: title }),
-            jsx('div', {
-              className: 'flex flex-col gap-0.5 text-xs mt-1',
-              children: segs.map(m =>
-                jsx('div', {
-                  className: 'flex items-center justify-between gap-2',
-                  children: [
-                    jsx('span', { className: 'truncate', children: m.model }),
-                    jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0 tabular-nums', children: [
-                      `${m.requests} req · ${m.share_pct != null ? m.share_pct.toFixed(1) : ''}%`,
-                      withCost && m.est_cost_per_req != null ? ` · $${m.est_cost_per_req.toFixed(4)} (${m.est_cost_per_req_pct != null ? m.est_cost_per_req_pct.toFixed(3) : ''}%/req)` : ''
-                    ]})
-                  ]
-                }, m.model)
-              )
-            })
-          ]
-        })
+        return segs.map(m =>
+          jsx('div', {
+            className: 'flex items-center justify-between gap-2',
+            children: [
+              jsx('span', { className: 'truncate', children: m.model }),
+              jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0 tabular-nums', children: [
+                `${m.requests} req · ${m.share_pct != null ? m.share_pct.toFixed(1) : ''}%`,
+                withCost && m.est_cost_per_req != null ? ` · $${m.est_cost_per_req.toFixed(4)} (${m.est_cost_per_req_pct != null ? m.est_cost_per_req_pct.toFixed(3) : ''}%/req)` : ''
+              ]})
+            ]
+          }, m.model)
+        )
       }
-      rows.push(segTable('Session — per model', data.session_models, false))
-      rows.push(segTable('Weekly — per model', data.weekly_models, false))
+      const sessionRows = segRows(data.session_models, false)
+      const weeklyRows = segRows(data.weekly_models, false)
+      if (sessionRows) rows.push(jsx(Collapsible, { title: 'Session — per model', defaultOpen: true, children: sessionRows }))
+      if (weeklyRows) rows.push(jsx(Collapsible, { title: 'Weekly — per model', defaultOpen: true, children: weeklyRows }))
     }
 
-    // π✕ Daumen: average cost per request per model
+    // average cost per request per model
     if (data.weekly_models && data.weekly_models.length > 0 && data.est_weekly_budget != null) {
-      rows.push(jsxs('div', {
-        className: 'mt-3 border-t border-(--ui-stroke-secondary) pt-2 text-xs',
+      rows.push(jsx(Collapsible, {
+        title: 'Avg cost per request',
+        defaultOpen: false,
         children: [
-          jsx('div', { className: 'font-medium text-(--ui-text-secondary) mb-1', children: 'Avg cost per request' }),
+          data.weekly_models.map(m =>
+            jsxs('div', {
+              className: 'flex items-center justify-between gap-2 tabular-nums',
+              children: [
+                jsx('span', { className: 'truncate', children: m.model }),
+                jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0', children: [
+                  '$', (m.est_cost_per_req ?? 0).toFixed(4),
+                  ' · ', (m.est_cost_per_req_pct ?? 0).toFixed(3), '%'
+                ]})
+              ]
+            }, m.model)
+          ),
           jsx('div', {
-            className: 'flex flex-col gap-0.5 tabular-nums',
-            children: data.weekly_models.map(m =>
-              jsxs('div', {
-                className: 'flex items-center justify-between gap-2',
-                children: [
-                  jsx('span', { className: 'truncate', children: m.model }),
-                  jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0', children: [
-                    '$', (m.est_cost_per_req ?? 0).toFixed(4),
-                    ' · ', (m.est_cost_per_req_pct ?? 0).toFixed(3), '%'
-                  ]})
-                ]
-              }, m.model)
-            )
-          }),
-          jsxs('div', {
             className: 'text-(--ui-text-quaternary) mt-1',
             children: [
               'Budget: $', String(data.est_weekly_budget),
