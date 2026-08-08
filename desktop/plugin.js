@@ -18,7 +18,7 @@ const SECTION_KEYS = [
   'savings', 'limits', 'session_models', 'weekly_models',
   'cost_week', 'cost_lifetime', 'cache_hit', 'token_volume',
   'api_cost', 'cost_efficiency', 'break_even', 'monthly_proj',
-  'history', 'report',
+  'history',
 ]
 const SECTION_LABELS = {
   savings:        'Your savings headline',
@@ -34,7 +34,6 @@ const SECTION_LABELS = {
   break_even:     'Break-even comparison',
   monthly_proj:   'Monthly projection',
   history:        'Weekly history',
-  report:         'Open report (MD)',
 }
 const DEFAULT_SETTINGS = Object.fromEntries(SECTION_KEYS.map(k => [k, true]))
 
@@ -653,28 +652,7 @@ function UsagePane({ ctx }) {
             ]
           }, w.week + i)
         }),
-        jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: 'Weekly snapshots — kept locally, survives Ollama resets' }),
-        settings.report && jsxs('div', { className: 'flex items-center gap-2 mt-2', children: [
-          jsx('button', {
-            className: cn(
-              'rounded-md border px-2 py-1 text-xs',
-              'border-(--ui-stroke-secondary) text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)'
-            ),
-            type: 'button',
-            onClick: () => {
-              haptic('tap')
-              ctx.rest('/usage/report/open', { method: 'POST' }).then(r => {
-                host.notify({ kind: r?.opened ? 'info' : 'warning', message: r?.opened ? `Report opened: ${r.path}` : `Report: ${r?.path}` })
-              }).catch(() => host.notify({ kind: 'warning', message: 'Could not open report' }))
-            },
-            children: 'Open report (MD)'
-          }),
-          jsx('a', {
-            className: 'text-xs text-(--ui-accent) hover:underline truncate',
-            href: `file://${data?.report_path || '~/.hermes/ollama-usage-report.md'}`,
-            children: '📄 full stats'
-          })
-        ]})
+        jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: 'Weekly snapshots — kept locally, survives Ollama resets' })
       ]
     }))
   }
