@@ -1,6 +1,6 @@
 # Ollama Cloud Usage Stats
 
-Live Ollama Cloud usage in Hermes Agent — session & weekly quotas, per-model request counts, weekly history, average cost per request, and threshold alerts, right in the desktop app.
+Live Ollama Cloud usage in Hermes Agent — session & weekly quotas, per-model request counts, weekly history, average cost per request, and threshold alerts, right in the desktop app. Plus a **standalone CLI** that works without Hermes.
 
 ![Ollama Cloud](https://img.shields.io/badge/ollama-cloud-000000?logo=ollama&logoColor=white)
 ![CI](https://github.com/Kosello/ollama-cloud-usage-stats/actions/workflows/ci.yml/badge.svg)
@@ -99,7 +99,46 @@ The model share% comes straight from Ollama's own usage bar segments, which alre
 
 - **Cookie scraping is brittle** — if Ollama changes their settings page markup or the cookie expires, the plugin shows "Unavailable". Re-extract the cookie and it's back.
 - The cookie is a login token — keep it private (Keychain, or `chmod 600` on the file).
-- Works only in the Hermes **desktop** app (the backend loads via the gateway; the chip/pane need the desktop UI). The `/ollama` slash command from the [community plugin](https://github.com/3L0935/hermes-plugins) covers CLI/TUI.
+- Works only in the Hermes **desktop** app (the backend loads via the gateway; the chip/pane need the desktop UI). The `/ollama` slash command from the [community plugin](https://github.com/3L0935/hermes-plugins) covers CLI/TUI. For non-Hermes users, see the **Standalone CLI** below.
+
+## Standalone CLI (no Hermes needed)
+
+`standalone/ollama-cloud-watch.py` — a single Python file, zero dependencies (stdlib only). Works on macOS, Linux, Windows.
+
+```bash
+# Print current usage once
+python standalone/ollama-cloud-watch.py
+
+# Poll every 30 minutes, record history, fire threshold alerts
+python standalone/ollama-cloud-watch.py --watch
+
+# Record one snapshot (good for cron)
+python standalone/ollama-cloud-watch.py --history
+
+# Silent alert if threshold crossed (cron watchdog)
+python standalone/ollama-cloud-watch.py --alert
+
+# Generate full stats MD report
+python standalone/ollama-cloud-watch.py --report --open
+```
+
+**Cookie setup** (same as the plugin):
+```bash
+# macOS Keychain:
+security add-generic-password -s ollama-cloud-watch -a ollama -w '<cookie>' -U
+# Or plain file:
+echo '__Secure-session=<value>' > ~/.ollama-cloud-cookie.txt
+```
+
+**Cron examples (non-macOS or without Hermes):**
+```bash
+# Watchdog every 30 min
+*/30 * * * * python /path/to/ollama-cloud-watch.py --alert --cookie ~/.ollama-cloud-cookie.txt
+# Daily summary at 9am
+0 9 * * * python /path/to/ollama-cloud-watch.py --history --cookie ~/.ollama-cloud-cookie.txt
+```
+
+History is written to `~/.ollama-cloud-history.jsonl` and sessions to `~/.ollama-cloud-sessions.jsonl` — independent from the Hermes plugin's files.
 
 ## Development
 
@@ -119,9 +158,11 @@ backend/
     plugin_api.py             # FastAPI router → scrapes ollama.com/settings
 desktop/
   plugin.js                   # desktop plugin (statusbar chip + pane)
+standalone/
+  ollama-cloud-watch.py       # standalone CLI (no Hermes needed, stdlib only)
 scripts/
-  ollama_usage_watch.py       # threshold watchdog (cron, silent unless crossed)
-  ollama_usage_daily.py       # daily one-line usage summary (cron)
+  ollama_usage_watch.py       # threshold watchdog (Hermes cron, silent unless crossed)
+  ollama_usage_daily.py       # daily one-line usage summary (Hermes cron)
 tests/
   test_parser.py              # parser smoke test
   fixtures/settings_page.html # saved page snapshot for CI
