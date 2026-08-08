@@ -15,7 +15,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const ID = 'ollama-usage-monitor'
 const REFRESH_MS = 60000 // poll backend every 60s
 
-// ── data hook ─────────────────────────────────────────────────────────────
+// ── data hooks ────────────────────────────────────────────────────────────
 function useUsage(ctx) {
   return useQuery({
     queryKey: [ctx.source, 'usage'],
@@ -26,12 +26,31 @@ function useUsage(ctx) {
   })
 }
 
+function useHistory(ctx) {
+  return useQuery({
+    queryKey: [ctx.source, 'history'],
+    queryFn: () => ctx.rest('/usage/history'),
+    staleTime: 300000,
+    retry: 1
+  })
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────
 function pctColor(p) {
   if (p == null) return 'text-(--ui-text-tertiary)'
   if (p >= 90) return 'text-(--ui-badge-error)'
   if (p >= 75) return 'text-(--ui-badge-warning)'
   return 'text-(--ui-text-secondary)'
+}
+
+function trendArrow(weeks) {
+  if (!weeks || weeks.length < 2) return null
+  const cur = weeks[0]?.weekly_used_pct
+  const prev = weeks[1]?.weekly_used_pct
+  if (cur == null || prev == null) return null
+  if (cur > prev) return '↑'
+  if (cur < prev) return '↓'
+  return '→'
 }
 
 // ── statusbar chip ────────────────────────────────────────────────────────
@@ -90,6 +109,7 @@ function UsageChip({ ctx }) {
 // ── pane ──────────────────────────────────────────────────────────────────
 function UsagePane({ ctx }) {
   const { data, isLoading, refetch } = useUsage(ctx)
+  const { data: hist } = useHistory(ctx)
   const qc = useQueryClient()
 
   const refresh = () => {
@@ -191,6 +211,40 @@ function UsagePane({ ctx }) {
         ]
       }))
     }
+  }
+
+  // Weekly history — last 8 weeks with trend vs previous week
+  const weeks = hist?.weeks || []
+  if (weeks.length > 0) {
+    const arrow = trendArrow(weeks)
+    rows.push(jsxs('div', {
+      className: 'mt-3 border-t border-(--ui-stroke-secondary) pt-2 text-xs',
+      children: [
+        jsx('div', { className: 'font-medium text-(--ui-text-secondary) mb-1', children: 'Weekly history' }),
+        jsx('div', {
+          className: 'flex flex-col gap-0.5 tabular-nums',
+          children: weeks.map((w, i) => {
+            const pct = w.weekly_used_pct
+            const isCur = i === 0
+            return jsxs('div', {
+              className: 'flex items-center justify-between gap-2',
+              children: [
+                jsxs('span', { className: 'truncate', children: [
+                  w.week,
+                  isCur && arrow ? jsx('span', { className: 'ml-1', children: arrow }) : null
+                ]}),
+                jsxs('span', { className: 'shrink-0 text-(--ui-text-secondary)', children: [
+                  pct != null ? `${pct.toFixed(1)}%` : '?',
+                  ' · $', String(w.est_cost_consumed != null ? w.est_cost_consumed.toFixed(2) : '?'),
+                  w.top_model ? ` · ${w.top_model}` : ''
+                ]})
+              ]
+            }, w.week + i)
+          })
+        }),
+        jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: 'Weekly snapshots — kept locally, survives Ollama resets' })
+      ]
+    }))
   }
 
   rows.push(jsx('button', {

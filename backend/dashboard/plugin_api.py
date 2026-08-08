@@ -6,16 +6,23 @@ Scrapes ollama.com/settings with the session cookie (same approach as the
 community /ollama slash command, extended with per-model request counts
 and a small in-memory cache so the settings page is not hammered).
 
-Cookie file: ~/.hermes/ollama_cookie.txt  (__Secure-session=<value>)
+Cookie storage (portable — works on any OS):
+  - macOS Keychain  (service 'hermes-ollama-cookie', account 'ollama')
+  - or plain file   ~/.hermes/ollama_cookie.txt  (__Secure-session=<value>)
+  Selection via env OLLAMA_COOKIE_SOURCE=auto|keychain|file (default: auto).
+  'auto' = Keychain if a cookie is stored there, otherwise the file.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
+import subprocess
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter
@@ -25,9 +32,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 COOKIE_FILE = Path.home() / ".hermes" / "ollama_cookie.txt"
+KEYCHAIN_SERVICE = "hermes-ollama-cookie"
+KEYCHAIN_ACCOUNT = "ollama"
 SETTINGS_URL = "https://ollama.com/settings"
 TIMEOUT = 15
 CACHE_TTL_SECONDS = 60
+HISTORY_FILE = Path.home() / ".hermes" / "ollama-usage-history.jsonl"
+HISTORY_MAX_WEEKS = 8
 
 _cache: dict = {"ts": 0, "data": None}
 
@@ -58,17 +69,73 @@ def _format_reset(iso_str: str) -> str:
         return iso_str
 
 
-def _load_cookie() -> str:
-    """Read the session cookie from the cookie file."""
-    if not COOKIE_FILE.exists():
-        raise FileNotFoundError(
-            f"Cookie file not found at {COOKIE_FILE}\n"
-            f"Run: echo '__Secure-session=<value>' > {COOKIE_FILE}"
+def _cookie_source() -> str:
+    """Resolve the cookie storage source: auto | keychain | file."""
+    return os.environ.get("OLLAMA_COOKIE_SOURCE", "auto").strip().lower()
+
+
+def _keychain_cookie() -> str | None:
+    """Read cookie from macOS Keychain. Returns None if unavailable/empty."""
+    if _cookie_source() == "file":
+        return None
+    try:
+        out = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE,
+             "-a", KEYCHAIN_ACCOUNT, "-w"],
+            capture_output=True, text=True, timeout=10,
         )
-    cookie = COOKIE_FILE.read_text().strip()
-    if not cookie:
-        raise ValueError("Cookie file is empty")
-    return cookie
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        pass  # not macOS / no security binary / timeout
+    return None
+
+
+def _keychain_store_cookie(cookie: str) -> bool:
+    """Store cookie in macOS Keychain. Returns False on non-macOS or failure."""
+    try:
+        # Try delete-then-add so an expired cookie gets replaced.
+        subprocess.run(
+            ["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE,
+             "-a", KEYCHAIN_ACCOUNT],
+            capture_output=True, text=True, timeout=10,
+        )
+        add = subprocess.run(
+            ["security", "add-generic-password", "-s", KEYCHAIN_SERVICE,
+             "-a", KEYCHAIN_ACCOUNT, "-w", cookie, "-U"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return add.returncode == 0
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return False
+
+
+def _load_cookie() -> str:
+    """Read the session cookie — Keychain first (auto), then the file."""
+    source = _cookie_source()
+    if source in ("auto", "keychain"):
+        kc = _keychain_cookie()
+        if kc:
+            return kc
+        if source == "keychain":
+            raise FileNotFoundError(
+                f"No cookie in macOS Keychain ({KEYCHAIN_SERVICE}/{KEYCHAIN_ACCOUNT}).\n"
+                f"Store it with: security add-generic-password -s {KEYCHAIN_SERVICE} "
+                f"-a {KEYCHAIN_ACCOUNT} -w '<cookie>'"
+            )
+
+    if source in ("auto", "file"):
+        if not COOKIE_FILE.exists():
+            raise FileNotFoundError(
+                f"Cookie file not found at {COOKIE_FILE}\n"
+                f"Run: echo '__Secure-session=<value>' > {COOKIE_FILE}"
+            )
+        cookie = COOKIE_FILE.read_text().strip()
+        if not cookie:
+            raise ValueError("Cookie file is empty")
+        return cookie
+
+    raise ValueError(f"Unknown OLLAMA_COOKIE_SOURCE: {source} (use auto|keychain|file)")
 
 
 def _fetch_settings_page(cookie: str) -> str:
@@ -188,6 +255,85 @@ def _parse_usage(html: str) -> dict:
     return result
 
 
+def _week_key(iso_str: str | None) -> str | None:
+    """ISO week start (Monday) for a reset timestamp — used to dedupe snapshots."""
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        monday = dt - timedelta(days=dt.weekday())
+        return monday.date().isoformat()
+    except (ValueError, TypeError):
+        return None
+
+
+def _record_history(data: dict) -> None:
+    """Append one snapshot per ISO week to the JSONL history file."""
+    if not data.get("ok") or data.get("weekly_used_pct") is None:
+        return
+    week = _week_key(data.get("weekly_reset"))
+    if not week:
+        return
+    try:
+        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # Dedupe: rewrite file without an existing record for this week,
+        # keeping the latest snapshot per week (Ollama resets weekly).
+        kept = []
+        if HISTORY_FILE.exists():
+            for line in HISTORY_FILE.read_text().splitlines():
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("week") != week:
+                    kept.append(line)
+        record = {
+            "week": week,
+            "ts": _utc_now().isoformat(timespec="seconds"),
+            "weekly_used_pct": data.get("weekly_used_pct"),
+            "session_used_pct": data.get("session_used_pct"),
+            "est_cost_consumed": data.get("est_cost_consumed"),
+            "est_weekly_budget": data.get("est_weekly_budget"),
+            "models": [
+                {"model": m.get("model"), "requests": m.get("requests"),
+                 "share_pct": m.get("share_pct")}
+                for m in (data.get("weekly_models") or [])
+            ],
+        }
+        kept.append(json.dumps(record))
+        HISTORY_FILE.write_text("\n".join(kept) + "\n")
+        # Trim to newest HISTORY_MAX_WEEKS records
+        lines = HISTORY_FILE.read_text().splitlines()
+        if len(lines) > HISTORY_MAX_WEEKS:
+            HISTORY_FILE.write_text("\n".join(lines[-HISTORY_MAX_WEEKS:]) + "\n")
+    except OSError as e:
+        logger.warning("Could not write history: %s", e)
+
+
+def _history() -> dict:
+    """Aggregate weekly history for the pane (newest first, max 8 weeks)."""
+    if not HISTORY_FILE.exists():
+        return {"ok": True, "weeks": []}
+    weeks = []
+    for line in HISTORY_FILE.read_text().splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        top = None
+        if rec.get("models"):
+            top = max(rec["models"], key=lambda m: m.get("share_pct") or 0)
+        weeks.append({
+            "week": rec.get("week"),
+            "weekly_used_pct": rec.get("weekly_used_pct"),
+            "est_cost_consumed": rec.get("est_cost_consumed"),
+            "top_model": top.get("model") if top else None,
+            "total_requests": sum(m.get("requests") or 0 for m in (rec.get("models") or [])),
+        })
+    weeks.sort(key=lambda w: w.get("week") or "", reverse=True)
+    return {"ok": True, "weeks": weeks[:HISTORY_MAX_WEEKS]}
+
+
 def _fetch_usage() -> dict:
     """Fetch Ollama Cloud usage — returns dict with data or error."""
     now = time.time()
@@ -206,6 +352,7 @@ def _fetch_usage() -> dict:
         data["ok"] = True
         _cache["ts"] = now
         _cache["data"] = data
+        _record_history(data)
         return data
     except FileNotFoundError as e:
         return {"ok": False, "error": "cookie_not_configured", "detail": str(e)}
@@ -230,3 +377,9 @@ async def usage_refresh():
     _cache["ts"] = 0
     _cache["data"] = None
     return _fetch_usage()
+
+
+@router.get("/usage/history")
+async def usage_history():
+    """Weekly history aggregation (newest first, max 8 weeks)."""
+    return _history()
