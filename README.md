@@ -5,6 +5,14 @@ Live Ollama Cloud usage in Hermes Agent — session & weekly quotas, per-model r
 ![Ollama Cloud](https://img.shields.io/badge/ollama-cloud-000000?logo=ollama&logoColor=white)
 ![CI](https://github.com/Kosello/hermes-ollama-usage-monitor/actions/workflows/ci.yml/badge.svg)
 
+## Quick install
+
+```bash
+hermes plugins install Kosello/hermes-ollama-usage-monitor
+```
+
+Then add the desktop plugin (`desktop/plugin.js` → `~/.hermes/desktop-plugins/ollama-usage-monitor/`), set up the cookie (see [Install](#install)), restart the gateway, and reload desktop plugins (⌘K).
+
 ## What it shows
 
 - **Statusbar chip** — always-visible `Pro S25% W35%` summary, color-coded (yellow ≥75%, red ≥90%)
