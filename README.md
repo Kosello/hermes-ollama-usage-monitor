@@ -1,9 +1,9 @@
-# Ollama Cloud Usage Stats
+# Hermes Ollama Usage Monitor
 
 Live Ollama Cloud usage in Hermes Agent — session & weekly quotas, per-model request counts, weekly history, average cost per request, and threshold alerts, right in the desktop app. Plus a **standalone CLI** that works without Hermes.
 
 ![Ollama Cloud](https://img.shields.io/badge/ollama-cloud-000000?logo=ollama&logoColor=white)
-![CI](https://github.com/Kosello/ollama-cloud-usage-stats/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/Kosello/hermes-ollama-usage-monitor/actions/workflows/ci.yml/badge.svg)
 
 ## What it shows
 
