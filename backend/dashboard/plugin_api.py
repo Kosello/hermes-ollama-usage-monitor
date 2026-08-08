@@ -253,6 +253,40 @@ def _parse_usage(html: str) -> dict:
     total_reqs = sum(s["requests"] for s in weekly_segs)
     result["est_avg_cost_per_req"] = round(cost_consumed / total_reqs, 4) if total_reqs else 0.0
 
+    # ── Real API price comparison ─────────────────────────────────────────
+    # Official API list prices per 1M tokens (input/output), USD, Aug 2026:
+    #   glm-5.2            $1.40 / $4.40   (Z.ai official)
+    #   deepseek-v4-flash  $0.14 / $0.28   (DeepSeek)
+    #   deepseek-v4-pro    $1.74 / $3.48   (DeepSeek)
+    #   minimax-m3         $0.24 / $0.96   (MiniMax)
+    # We only know request counts, not token counts, so the comparison uses
+    # a fixed rough assumption: AVG_IN_TOKENS in + AVG_OUT_TOKENS out per
+    # request. Clearly a proxy — labeled as such in the pane.
+    AVG_IN_TOKENS = 1000
+    AVG_OUT_TOKENS = 500
+    API_PRICES = {
+        "glm-5.2": (1.40, 4.40),
+        "deepseek-v4-flash:0731": (0.14, 0.28),
+        "deepseek-v4-flash": (0.14, 0.28),
+        "deepseek-v4-pro": (1.74, 3.48),
+        "minimax-m3": (0.24, 0.96),
+        "gemma4:31b": (0.30, 0.90),
+    }
+    api_weekly_total = 0.0
+    for seg in weekly_segs:
+        prices = API_PRICES.get(seg["model"])
+        if prices:
+            p_in, p_out = prices
+            per_req = (AVG_IN_TOKENS / 1e6) * p_in + (AVG_OUT_TOKENS / 1e6) * p_out
+            seg["api_cost_per_req"] = round(per_req, 5)
+            seg["api_weekly_cost"] = round(per_req * seg["requests"], 4)
+            api_weekly_total += seg["api_weekly_cost"]
+        else:
+            seg["api_cost_per_req"] = None
+            seg["api_weekly_cost"] = None
+    result["api_weekly_total"] = round(api_weekly_total, 4)
+    result["api_assumption"] = f"~{AVG_IN_TOKENS} in + {AVG_OUT_TOKENS} out tokens/req"
+
     return result
 
 

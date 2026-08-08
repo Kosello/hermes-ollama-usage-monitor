@@ -59,6 +59,13 @@ def main() -> int:
     assert by["glm-5.2"]["est_cost_per_req"] > 0
     assert by["glm-5.2"]["est_cost_per_req_pct"] > 0
 
+    # Real API price comparison (fixture: glm-5.2, deepseek-v4-flash:0731, minimax-m3)
+    assert data["api_weekly_total"] > 0, data["api_weekly_total"]
+    assert by["glm-5.2"]["api_cost_per_req"] == 0.0036, by["glm-5.2"]["api_cost_per_req"]
+    assert abs(by["glm-5.2"]["api_weekly_cost"] - 1.9944) < 0.001, by["glm-5.2"]["api_weekly_cost"]
+    assert by["minimax-m3"]["api_cost_per_req"] == 0.00072, by["minimax-m3"]["api_cost_per_req"]
+    assert data["api_assumption"] == "~1000 in + 500 out tokens/req", data["api_assumption"]
+
     print("✅ parser smoke test passed")
     print(f"   plan={data['plan']} session={data['session_used_pct']}% weekly={data['weekly_used_pct']}%")
     print(f"   session models={len(s)} weekly models={len(w)}")

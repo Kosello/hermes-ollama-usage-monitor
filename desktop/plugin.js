@@ -264,6 +264,41 @@ function UsagePane({ ctx }) {
     }))
   }
 
+  // Real API price comparison — at the complete bottom
+  if (data && data.ok !== false && data.api_weekly_total != null && data.weekly_models && data.weekly_models.length > 0) {
+    const known = data.weekly_models.filter(m => m.api_cost_per_req != null)
+    rows.push(jsx(Collapsible, {
+      title: 'vs. real API prices',
+      defaultOpen: false,
+      children: [
+        known.map(m =>
+          jsxs('div', {
+            className: 'flex items-center justify-between gap-2 tabular-nums',
+            children: [
+              jsx('span', { className: 'truncate', children: m.model }),
+              jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0', children: [
+                '$', String(m.api_weekly_cost != null ? m.api_weekly_cost.toFixed(2) : '?'),
+                '/wk · $', String(m.api_cost_per_req != null ? m.api_cost_per_req.toFixed(4) : '?'),
+                '/req'
+              ]})
+            ]
+          }, m.model)
+        ),
+        jsxs('div', {
+          className: 'flex items-center justify-between gap-2 border-t border-(--ui-stroke-secondary) pt-1 mt-1 font-medium',
+          children: [
+            jsx('span', { children: 'API total this week' }),
+            jsxs('span', { children: [
+              '$', String(data.api_weekly_total.toFixed(2)),
+              ' vs Ollama $', String((data.est_cost_consumed ?? 0).toFixed(2))
+            ]})
+          ]
+        }),
+        jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: `Rough: assumes ${data.api_assumption || '~1000 in + 500 out tokens/req'}` })
+      ]
+    }))
+  }
+
   rows.push(jsx('button', {
     className: cn(
       'mt-3 self-start rounded-md border px-2 py-1 text-xs',
