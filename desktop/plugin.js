@@ -198,17 +198,29 @@ function UsagePane({ ctx }) {
   const [settings, setSettings] = useState(null)
   const [showSettings, setShowSettings] = useState(false)
 
-  // Load on mount
+  // Load on mount — ctx.storage may not exist, use localStorage fallback
   useEffect(() => {
     let done = false
-    if (ctx.storage) {
-      ctx.storage.get('settings').then(s => {
-        if (!done) setSettings({ ...DEFAULT_SETTINGS, ...s })
-      }).catch(() => {
-        if (!done) setSettings(DEFAULT_SETTINGS)
-      })
+    const loadSettings = () => {
+      try {
+        const raw = localStorage.getItem('ollama-usage-settings')
+        if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }
+      } catch (e) { /* ignore */ }
+      return DEFAULT_SETTINGS
+    }
+    if (ctx.storage && typeof ctx.storage.get === 'function') {
+      const result = ctx.storage.get('settings')
+      if (result && typeof result.then === 'function') {
+        result.then(s => {
+          if (!done) setSettings({ ...DEFAULT_SETTINGS, ...s })
+        }).catch(() => {
+          if (!done) setSettings(loadSettings())
+        })
+      } else {
+        setSettings({ ...DEFAULT_SETTINGS, ...result })
+      }
     } else {
-      setSettings(DEFAULT_SETTINGS)
+      setSettings(loadSettings())
     }
     return () => { done = true }
   }, [])
@@ -216,7 +228,12 @@ function UsagePane({ ctx }) {
   const saveSetting = (key, val) => {
     const next = { ...settings, [key]: val }
     setSettings(next)
-    if (ctx.storage) ctx.storage.set('settings', next)
+    try {
+      if (ctx.storage && typeof ctx.storage.set === 'function') {
+        ctx.storage.set('settings', next)
+      }
+      localStorage.setItem('ollama-usage-settings', JSON.stringify(next))
+    } catch (e) { /* ignore */ }
   }
 
   const refresh = () => {
