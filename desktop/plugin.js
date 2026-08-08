@@ -166,14 +166,12 @@ function UsagePane({ ctx }) {
       children: [
         jsx('div', { className: 'flex items-center justify-between', children: [
           jsx('span', { children: 'Session' }),
-          jsx('span', { className: pctColor(s), children: s != null ? `${s.toFixed(1)}% used` : 'n/a' })
+          jsx('span', { className: pctColor(s), children: s != null ? `${s.toFixed(1)}% used · resets in ${data.session_reset || '?'}` : 'n/a' })
         ]}),
         jsx('div', { className: 'flex items-center justify-between', children: [
           jsx('span', { children: 'Weekly' }),
-          jsx('span', { className: pctColor(w), children: w != null ? `${w.toFixed(1)}% used` : 'n/a' })
-        ]}),
-        jsx('div', { className: 'text-(--ui-text-quaternary) text-xs', children: data.session_reset ? `Session resets ${data.session_reset}` : '' }),
-        jsx('div', { className: 'text-(--ui-text-quaternary) text-xs', children: data.weekly_reset ? `Weekly resets ${data.weekly_reset}` : '' })
+          jsx('span', { className: pctColor(w), children: w != null ? `${w.toFixed(1)}% used · resets in ${data.weekly_reset || '?'}` : 'n/a' })
+        ]})
       ]
     }))
     if ((data.session_models && data.session_models.length > 0) || (data.weekly_models && data.weekly_models.length > 0)) {
