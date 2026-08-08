@@ -164,13 +164,19 @@ function UsagePane({ ctx }) {
       title: 'Limits',
       defaultOpen: true,
       children: [
-        jsx('div', { className: 'flex items-center justify-between', children: [
-          jsx('span', { children: 'Session' }),
-          jsx('span', { className: pctColor(s), children: s != null ? `${s.toFixed(1)}% used · resets in ${data.session_reset || '?'}` : 'n/a' })
+        jsx('div', { className: 'flex items-center justify-between gap-2', children: [
+          jsxs('span', { className: 'truncate', children: [
+            'Session',
+            jsx('span', { className: 'text-(--ui-text-quaternary)', children: ` · resets in ${data.session_reset || '?'}` })
+          ]}),
+          jsx('span', { className: pctColor(s), children: s != null ? `${s.toFixed(1)}% used` : 'n/a' })
         ]}),
-        jsx('div', { className: 'flex items-center justify-between', children: [
-          jsx('span', { children: 'Weekly' }),
-          jsx('span', { className: pctColor(w), children: w != null ? `${w.toFixed(1)}% used · resets in ${data.weekly_reset || '?'}` : 'n/a' })
+        jsx('div', { className: 'flex items-center justify-between gap-2', children: [
+          jsxs('span', { className: 'truncate', children: [
+            'Weekly',
+            jsx('span', { className: 'text-(--ui-text-quaternary)', children: ` · resets in ${data.weekly_reset || '?'}` })
+          ]}),
+          jsx('span', { className: pctColor(w), children: w != null ? `${w.toFixed(1)}% used` : 'n/a' })
         ]})
       ]
     }))
