@@ -54,7 +54,7 @@ hermes gateway restart
 
 ## Cost estimate methodology
 
-Ollama Cloud bills by GPU-time utilization, not tokens. The per-request cost is a rough proxy ("π✕ Daumen"):
+Ollama Cloud bills by GPU-time utilization, not tokens. The per-request cost is a rough proxy:
 
 ```
 weekly_budget   = plan_price / 4.33          # Pro $20/mo ≈ $4.62/wk
