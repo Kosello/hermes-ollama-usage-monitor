@@ -496,7 +496,7 @@ function UsagePane({ ctx }) {
             ),
             jsx('div', {
               className: 'text-(--ui-text-quaternary) mt-1',
-              children: 'Token volume = avg tokens/req × request count. Explains why GLM costs more than Flash.'
+              children: 'Total tokens processed per model this week (avg tokens per request × requests)'
             })
           ]
         }))
