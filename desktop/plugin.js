@@ -36,6 +36,15 @@ function useHistory(ctx) {
   })
 }
 
+function useLifetime(ctx) {
+  return useQuery({
+    queryKey: [ctx.source, 'lifetime'],
+    queryFn: () => ctx.rest('/usage/lifetime'),
+    staleTime: 300000,
+    retry: 1
+  })
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────
 function pctColor(p) {
   if (p == null) return 'text-(--ui-text-tertiary)'
@@ -137,6 +146,7 @@ function UsageChip({ ctx }) {
 function UsagePane({ ctx }) {
   const { data, isLoading, refetch } = useUsage(ctx)
   const { data: hist } = useHistory(ctx)
+  const { data: lifetime } = useLifetime(ctx)
   const qc = useQueryClient()
 
   const refresh = () => {
@@ -202,10 +212,10 @@ function UsagePane({ ctx }) {
       if (weeklyRows) rows.push(jsx(Collapsible, { title: 'Weekly — per model', defaultOpen: true, children: weeklyRows }))
     }
 
-    // average cost per request per model
+    // average cost per request per model — this week
     if (data.weekly_models && data.weekly_models.length > 0 && data.est_weekly_budget != null) {
       rows.push(jsx(Collapsible, {
-        title: 'Avg cost per request',
+        title: 'Avg cost per request (this week)',
         defaultOpen: false,
         children: [
           data.weekly_models.map(m =>
@@ -227,6 +237,38 @@ function UsagePane({ ctx }) {
               '/wk · consumed: $', String(data.est_cost_consumed),
               ' · avg $', String(data.est_avg_cost_per_req ?? ''),
               '/req across all models'
+            ]
+          })
+        ]
+      }))
+    }
+
+    // average cost per request — lifetime (all recorded weeks)
+    if (lifetime && lifetime.ok !== false && lifetime.models && lifetime.models.length > 0) {
+      rows.push(jsx(Collapsible, {
+        title: 'Avg cost per request (lifetime)',
+        defaultOpen: false,
+        children: [
+          lifetime.models.map(m =>
+            jsxs('div', {
+              className: 'flex items-center justify-between gap-2 tabular-nums',
+              children: [
+                jsx('span', { className: 'truncate', children: m.model }),
+                jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0', children: [
+                  '$', (m.est_cost_per_req ?? 0).toFixed(4),
+                  ' · ', (m.est_cost_per_req_pct ?? 0).toFixed(3), '%'
+                ]})
+              ]
+            }, m.model)
+          ),
+          jsx('div', {
+            className: 'text-(--ui-text-quaternary) mt-1',
+            children: [
+              String(lifetime.weeks_count ?? 0), ' weeks · ',
+              String(lifetime.total_requests ?? 0), ' requests · total $',
+              String((lifetime.est_total_cost ?? 0).toFixed(2)),
+              ' · avg $', String((lifetime.est_avg_cost_per_req ?? 0).toFixed(4)),
+              '/req'
             ]
           })
         ]

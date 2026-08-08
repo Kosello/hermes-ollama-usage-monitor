@@ -413,16 +413,16 @@ def _record_history(data: dict) -> None:
             "est_weekly_budget": data.get("est_weekly_budget"),
             "models": [
                 {"model": m.get("model"), "requests": m.get("requests"),
-                 "share_pct": m.get("share_pct")}
+                 "share_pct": m.get("share_pct"),
+                 "est_cost_per_req": m.get("est_cost_per_req"),
+                 "est_cost_per_req_pct": m.get("est_cost_per_req_pct")}
                 for m in (data.get("weekly_models") or [])
             ],
         }
         kept.append(json.dumps(record))
         HISTORY_FILE.write_text("\n".join(kept) + "\n")
-        # Trim to newest HISTORY_MAX_WEEKS records
-        lines = HISTORY_FILE.read_text().splitlines()
-        if len(lines) > HISTORY_MAX_WEEKS:
-            HISTORY_FILE.write_text("\n".join(lines[-HISTORY_MAX_WEEKS:]) + "\n")
+        # NOTE: no trimming here — the full log is the lifetime source.
+        # Display slicing to HISTORY_MAX_WEEKS happens in _history().
     except OSError as e:
         logger.warning("Could not write history: %s", e)
 
@@ -583,6 +583,68 @@ def _history() -> dict:
     return {"ok": True, "weeks": weeks[:HISTORY_MAX_WEEKS]}
 
 
+def _lifetime_stats() -> dict:
+    """Aggregate ALL history records — lifetime totals and per-model
+    lifetime average cost per request (in $ and % of weekly budget)."""
+    if not HISTORY_FILE.exists():
+        return {"ok": True, "weeks_count": 0, "models": []}
+
+    weeks = []
+    for line in HISTORY_FILE.read_text().splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        weeks.append(rec)
+
+    if not weeks:
+        return {"ok": True, "weeks_count": 0, "models": []}
+
+    # Per-model lifetime aggregation: sum requests, and cost per request
+    # weighted by requests (weighted mean of each week's est_cost_per_req).
+    model_reqs: dict[str, int] = {}
+    model_cost_wsum: dict[str, float] = {}
+    for rec in weeks:
+        for m in rec.get("models") or []:
+            model = m.get("model")
+            reqs = m.get("requests") or 0
+            cost_per_req = m.get("est_cost_per_req")
+            if not model or reqs <= 0:
+                continue
+            model_reqs[model] = model_reqs.get(model, 0) + reqs
+            if cost_per_req is not None:
+                model_cost_wsum[model] = model_cost_wsum.get(model, 0.0) + cost_per_req * reqs
+
+    total_reqs = sum(model_reqs.values())
+    total_cost = sum(model_cost_wsum.values())
+
+    # Weekly budget baseline (Pro) for the % — same basis as the weekly calc.
+    weekly_budget = 20.0 / 4.33
+
+    models = []
+    for model in model_reqs:
+        reqs = model_reqs[model]
+        cost_per_req = model_cost_wsum.get(model, 0.0) / reqs if reqs else 0.0
+        models.append({
+            "model": model,
+            "requests": reqs,
+            "est_cost_per_req": round(cost_per_req, 4),
+            "est_cost_per_req_pct": round(cost_per_req / weekly_budget * 100.0, 4),
+            "est_cost": round(model_cost_wsum.get(model, 0.0), 4),
+        })
+    models.sort(key=lambda m: m.get("requests") or 0, reverse=True)
+
+    return {
+        "ok": True,
+        "weeks_count": len(weeks),
+        "total_requests": total_reqs,
+        "est_total_cost": round(total_cost, 4),
+        "est_avg_cost_per_req": round(total_cost / total_reqs, 4) if total_reqs else 0.0,
+        "est_avg_cost_per_req_pct": round((total_cost / total_reqs) / weekly_budget * 100.0, 4) if total_reqs else 0.0,
+        "models": models,
+    }
+
+
 def _fetch_usage() -> dict:
     """Fetch Ollama Cloud usage — returns dict with data or error."""
     now = time.time()
@@ -633,6 +695,12 @@ async def usage_refresh():
 async def usage_history():
     """Weekly history aggregation (newest first, max 8 weeks)."""
     return _history()
+
+
+@router.get("/usage/lifetime")
+async def usage_lifetime():
+    """Lifetime stats — all history records aggregated."""
+    return _lifetime_stats()
 
 
 @router.get("/usage/report")
