@@ -65,6 +65,10 @@ def main() -> int:
     assert abs(by["glm-5.2"]["api_weekly_cost"] - 1.9944) < 0.001, by["glm-5.2"]["api_weekly_cost"]
     assert by["minimax-m3"]["api_cost_per_req"] == 0.00072, by["minimax-m3"]["api_cost_per_req"]
     assert data["api_assumption"] == "~1000 in + 500 out tokens/req", data["api_assumption"]
+    # Ollama cost as % of API price — present and sane
+    assert by["glm-5.2"]["api_cost_pct"] is not None, by["glm-5.2"]["api_cost_pct"]
+    assert by["glm-5.2"]["api_cost_pct"] > 0, by["glm-5.2"]["api_cost_pct"]
+    assert data["api_total_pct"] is not None and data["api_total_pct"] > 0, data["api_total_pct"]
 
     print("✅ parser smoke test passed")
     print(f"   plan={data['plan']} session={data['session_used_pct']}% weekly={data['weekly_used_pct']}%")

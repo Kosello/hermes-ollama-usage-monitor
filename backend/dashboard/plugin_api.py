@@ -281,11 +281,20 @@ def _parse_usage(html: str) -> dict:
             seg["api_cost_per_req"] = round(per_req, 5)
             seg["api_weekly_cost"] = round(per_req * seg["requests"], 4)
             api_weekly_total += seg["api_weekly_cost"]
+            if per_req > 0:
+                # Ollama's cost per request as % of the real API price.
+                seg["api_cost_pct"] = round(seg["est_cost_per_req"] / per_req * 100.0, 1)
+            else:
+                seg["api_cost_pct"] = None
         else:
             seg["api_cost_per_req"] = None
             seg["api_weekly_cost"] = None
+            seg["api_cost_pct"] = None
     result["api_weekly_total"] = round(api_weekly_total, 4)
     result["api_assumption"] = f"~{AVG_IN_TOKENS} in + {AVG_OUT_TOKENS} out tokens/req"
+    result["api_total_pct"] = (
+        round(cost_consumed / api_weekly_total * 100.0, 1) if api_weekly_total > 0 else None
+    )
 
     return result
 

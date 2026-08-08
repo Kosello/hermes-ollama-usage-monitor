@@ -160,8 +160,9 @@ function UsagePane({ ctx }) {
     const s = data.session_used_pct
     const w = data.weekly_used_pct
     rows.push(jsx('div', { className: 'font-medium', children: `Ollama Cloud — ${data.plan || 'Unknown'} plan` }))
-    rows.push(jsx('div', {
-      className: 'flex flex-col gap-1 text-sm',
+    rows.push(jsx(Collapsible, {
+      title: 'Limits',
+      defaultOpen: true,
       children: [
         jsx('div', { className: 'flex items-center justify-between', children: [
           jsx('span', { children: 'Session' }),
@@ -172,8 +173,7 @@ function UsagePane({ ctx }) {
           jsx('span', { className: pctColor(w), children: w != null ? `${w.toFixed(1)}% used` : 'n/a' })
         ]}),
         jsx('div', { className: 'text-(--ui-text-quaternary) text-xs', children: data.session_reset ? `Session resets ${data.session_reset}` : '' }),
-        jsx('div', { className: 'text-(--ui-text-quaternary) text-xs', children: data.weekly_reset ? `Weekly resets ${data.weekly_reset}` : '' }),
-        jsx('div', { className: 'text-(--ui-text-quaternary) text-xs mt-1', children: `Fetched ${data.fetched_at || ''}${data.cached ? ' (cached)' : ''}` })
+        jsx('div', { className: 'text-(--ui-text-quaternary) text-xs', children: data.weekly_reset ? `Weekly resets ${data.weekly_reset}` : '' })
       ]
     }))
     if ((data.session_models && data.session_models.length > 0) || (data.weekly_models && data.weekly_models.length > 0)) {
@@ -277,9 +277,9 @@ function UsagePane({ ctx }) {
             children: [
               jsx('span', { className: 'truncate', children: m.model }),
               jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0', children: [
-                '$', String(m.api_weekly_cost != null ? m.api_weekly_cost.toFixed(2) : '?'),
-                '/wk · $', String(m.api_cost_per_req != null ? m.api_cost_per_req.toFixed(4) : '?'),
-                '/req'
+                m.api_cost_pct != null ? `${m.api_cost_pct.toFixed(0)}% of API` : '?',
+                ' · $', String(m.api_weekly_cost != null ? m.api_weekly_cost.toFixed(2) : '?'),
+                '/wk'
               ]})
             ]
           }, m.model)
@@ -290,7 +290,8 @@ function UsagePane({ ctx }) {
             jsx('span', { children: 'API total this week' }),
             jsxs('span', { children: [
               '$', String(data.api_weekly_total.toFixed(2)),
-              ' vs Ollama $', String((data.est_cost_consumed ?? 0).toFixed(2))
+              ' · Ollama $', String((data.est_cost_consumed ?? 0).toFixed(2)),
+              data.api_total_pct != null ? ` (${data.api_total_pct.toFixed(0)}%)` : ''
             ]})
           ]
         }),
