@@ -47,24 +47,21 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _format_reset(iso_str: str) -> str:
-    """Format an ISO timestamp as a human-readable 'in Xh Ym' string."""
+def _relative_reset(iso_str: str) -> str:
+    """Format a reset timestamp as compact relative time: '4h', '23 min', '2 days'."""
     try:
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-        delta = dt - _utc_now()
-        total_s = int(delta.total_seconds())
+        total_s = int((dt - _utc_now()).total_seconds())
         if total_s <= 0:
-            return f"now ({dt.astimezone().strftime('%H:%M %Z')})"
-        hours, rem = divmod(total_s, 3600)
-        minutes = rem // 60
-        if hours >= 24:
-            days, hours = divmod(hours, 24)
-            rel = f"in {days}d {hours}h"
-        elif hours > 0:
-            rel = f"in {hours}h {minutes}m"
-        else:
-            rel = f"in {minutes}m"
-        return f"{rel} ({dt.astimezone().strftime('%H:%M %Z')})"
+            return "now"
+        minutes = total_s // 60
+        if minutes < 60:
+            return f"{minutes} min"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}h"
+        days = hours // 24
+        return f"{days} day" if days == 1 else f"{days} days"
     except (ValueError, TypeError):
         return iso_str
 
@@ -189,12 +186,16 @@ def _parse_usage(html: str) -> dict:
     if weekly_pct:
         result["weekly_used_pct"] = float(weekly_pct.group(1))
 
-    # Reset timestamps — data-time attributes, first two are session then weekly
+    # Reset timestamps — data-time attributes, first two are session then weekly.
+    # Stored as compact relative time for display ('4h', '2 days'), raw ISO
+    # kept in session_reset_iso / weekly_reset_iso for the history week-key.
     resets = re.findall(r'data-time="([^"]*)"', html)
     if len(resets) >= 1:
-        result["session_reset"] = resets[0]
+        result["session_reset"] = _relative_reset(resets[0])
+        result["session_reset_iso"] = resets[0]
     if len(resets) >= 2:
-        result["weekly_reset"] = resets[1]
+        result["weekly_reset"] = _relative_reset(resets[1])
+        result["weekly_reset_iso"] = resets[1]
 
     # Per-model usage segments — the usage bars are segmented per model:
     # <div data-usage-segment data-model="glm-5.2" data-requests="33"
@@ -271,7 +272,7 @@ def _record_history(data: dict) -> None:
     """Append one snapshot per ISO week to the JSONL history file."""
     if not data.get("ok") or data.get("weekly_used_pct") is None:
         return
-    week = _week_key(data.get("weekly_reset"))
+    week = _week_key(data.get("weekly_reset_iso"))
     if not week:
         return
     try:

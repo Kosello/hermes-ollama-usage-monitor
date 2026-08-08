@@ -35,8 +35,12 @@ def main() -> int:
     assert data["plan"] == "Pro", f"plan: {data['plan']}"
     assert data["session_used_pct"] == 24.7, data["session_used_pct"]
     assert data["weekly_used_pct"] == 41.1, data["weekly_used_pct"]
-    assert data["session_reset"] == "2026-08-08T13:00:00Z", data["session_reset"]
-    assert data["weekly_reset"] == "2026-08-10T13:00:00Z", data["weekly_reset"]
+    import re as _re
+    # Relative format: 'now' | '<n> min' | '<n>h' | '<n> day(s)'
+    assert _re.fullmatch(r"(now|\d+ min|\d+h|\d+ days?|2026-08-08T13:00:00Z)", data["session_reset"]), data["session_reset"]
+    assert data["session_reset"] != "2026-08-08T13:00:00Z", "session_reset should be relative, not raw ISO"
+    assert data["session_reset_iso"] == "2026-08-08T13:00:00Z", data["session_reset_iso"]
+    assert data["weekly_reset_iso"] == "2026-08-10T13:00:00Z", data["weekly_reset_iso"]
 
     s = data["session_models"]
     w = data["weekly_models"]
