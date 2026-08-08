@@ -5,6 +5,8 @@ Live Ollama Cloud usage in Hermes Agent — session & weekly quotas, per-model r
 ![Ollama Cloud](https://img.shields.io/badge/ollama-cloud-000000?logo=ollama&logoColor=white)
 ![CI](https://github.com/Kosello/hermes-ollama-usage-monitor/actions/workflows/ci.yml/badge.svg)
 
+![Dashboard screenshot](docs/screenshot-dashboard.png)
+
 ## Quick install
 
 ```bash
