@@ -19,7 +19,10 @@ BACKEND = HERE.parent / "backend" / "dashboard" / "plugin_api.py"
 # plugin_api imports fastapi for the router — stub it so the parser can be
 # tested without installing fastapi (works in CI too).
 _fastapi = types.ModuleType("fastapi")
-_RouterStub = type("APIRouter", (), {"get": lambda self, path: (lambda f: f)})
+_RouterStub = type("APIRouter", (), {
+    "get": lambda self, path: (lambda f: f),
+    "post": lambda self, path: (lambda f: f),
+})
 _fastapi.APIRouter = _RouterStub
 sys.modules["fastapi"] = _fastapi
 

@@ -40,6 +40,9 @@ TIMEOUT = 15
 CACHE_TTL_SECONDS = 60
 HISTORY_FILE = Path.home() / ".hermes" / "ollama-usage-history.jsonl"
 HISTORY_MAX_WEEKS = 8
+SESSION_FILE = Path.home() / ".hermes" / "ollama-usage-sessions.jsonl"
+REPORT_FILE = Path.home() / ".hermes" / "ollama-usage-report.md"
+SESSION_LOG_CAP = 500
 
 _cache: dict = {"ts": 0, "data": None}
 
@@ -424,6 +427,138 @@ def _record_history(data: dict) -> None:
         logger.warning("Could not write history: %s", e)
 
 
+def _record_session(data: dict) -> None:
+    """Append one snapshot per 5h session window to the JSONL session file.
+
+    Dedupes on the session reset ISO (the 5h window id) — keeps the LATEST
+    snapshot per window, so each 5h session ends up with one row showing its
+    peak usage.
+    """
+    if not data.get("ok") or data.get("session_used_pct") is None:
+        return
+    win = data.get("session_reset_iso")
+    if not win:
+        return
+    try:
+        SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        kept = []
+        if SESSION_FILE.exists():
+            for line in SESSION_FILE.read_text().splitlines():
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("window") != win:
+                    kept.append(line)
+        record = {
+            "window": win,
+            "ts": _utc_now().isoformat(timespec="seconds"),
+            "session_used_pct": data.get("session_used_pct"),
+            "weekly_used_pct": data.get("weekly_used_pct"),
+            "session_models": [
+                {"model": m.get("model"), "requests": m.get("requests"),
+                 "share_pct": m.get("share_pct")}
+                for m in (data.get("session_models") or [])
+            ],
+            "weekly_models": [
+                {"model": m.get("model"), "requests": m.get("requests"),
+                 "share_pct": m.get("share_pct")}
+                for m in (data.get("weekly_models") or [])
+            ],
+        }
+        kept.append(json.dumps(record))
+        SESSION_FILE.write_text("\n".join(kept) + "\n")
+        lines = SESSION_FILE.read_text().splitlines()
+        if len(lines) > SESSION_LOG_CAP:
+            SESSION_FILE.write_text("\n".join(lines[-SESSION_LOG_CAP:]) + "\n")
+    except OSError as e:
+        logger.warning("Could not write session log: %s", e)
+
+
+def _generate_report() -> str:
+    """Write the full stats MD report (weeks + all 5h sessions) to disk.
+
+    Returns the report file path. The report is regenerated on every call
+    from the two JSONL logs, so it always reflects everything captured.
+    """
+    weeks = []
+    if HISTORY_FILE.exists():
+        for line in HISTORY_FILE.read_text().splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            weeks.append(rec)
+    weeks.sort(key=lambda w: w.get("week") or "")
+
+    sessions = []
+    if SESSION_FILE.exists():
+        for line in SESSION_FILE.read_text().splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            sessions.append(rec)
+    sessions.sort(key=lambda s: s.get("ts") or "")
+
+    lines = []
+    lines.append("# Ollama Cloud Usage Stats")
+    lines.append("")
+    lines.append(f"_Generated {_utc_now().strftime('%Y-%m-%d %H:%M UTC')}_")
+    lines.append("")
+    lines.append("## Weekly overview")
+    lines.append("")
+    if weeks:
+        lines.append("| Week | Weekly used | Est. cost | Top model | Requests |")
+        lines.append("|------|-------------|-----------|-----------|----------|")
+        for w in weeks:
+            models = w.get("models") or []
+            top = max(models, key=lambda m: m.get("share_pct") or 0) if models else {}
+            total = sum(m.get("requests") or 0 for m in models)
+            cost = w.get("est_cost_consumed")
+            cost_s = f"${cost:.2f}" if cost is not None else "?"
+            lines.append(
+                f"| {w.get('week')} | {w.get('weekly_used_pct')}% | {cost_s} | "
+                f"{top.get('model') or '-'} | {total} |"
+            )
+    else:
+        lines.append("_No weekly snapshots yet — the plugin records one per ISO week._")
+    lines.append("")
+
+    lines.append("## All 5h sessions")
+    lines.append("")
+    if sessions:
+        for s in reversed(sessions[-50:]):  # newest 50 sessions
+            ts = s.get("ts", "")[:16].replace("T", " ")
+            lines.append(f"### {ts} — session {s.get('session_used_pct')}% · weekly {s.get('weekly_used_pct')}%")
+            lines.append("")
+            sm = s.get("session_models") or []
+            wm = s.get("weekly_models") or []
+            if sm:
+                lines.append("Session per model:")
+                lines.append("")
+                lines.append("| Model | Requests | Share |")
+                lines.append("|-------|----------|-------|")
+                for m in sm:
+                    lines.append(f"| {m.get('model')} | {m.get('requests')} | {m.get('share_pct')}% |")
+                lines.append("")
+            if wm:
+                lines.append("Weekly per model:")
+                lines.append("")
+                lines.append("| Model | Requests | Share |")
+                lines.append("|-------|----------|-------|")
+                for m in wm:
+                    lines.append(f"| {m.get('model')} | {m.get('requests')} | {m.get('share_pct')}% |")
+                lines.append("")
+    else:
+        lines.append("_No session snapshots yet — recorded once per 5h window._")
+        lines.append("")
+
+    REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_FILE.write_text("\n".join(lines))
+    return str(REPORT_FILE)
+
+
 def _history() -> dict:
     """Aggregate weekly history for the pane (newest first, max 8 weeks)."""
     if not HISTORY_FILE.exists():
@@ -467,6 +602,7 @@ def _fetch_usage() -> dict:
         _cache["ts"] = now
         _cache["data"] = data
         _record_history(data)
+        _record_session(data)
         return data
     except FileNotFoundError as e:
         return {"ok": False, "error": "cookie_not_configured", "detail": str(e)}
@@ -497,3 +633,22 @@ async def usage_refresh():
 async def usage_history():
     """Weekly history aggregation (newest first, max 8 weeks)."""
     return _history()
+
+
+@router.get("/usage/report")
+async def usage_report():
+    """Generate (or refresh) the full stats MD report; returns its path."""
+    path = _generate_report()
+    return {"ok": True, "path": path}
+
+
+@router.post("/usage/report/open")
+async def usage_report_open():
+    """Generate the report and open it in the default app (macOS 'open')."""
+    path = _generate_report()
+    try:
+        import subprocess as _sp
+        _sp.Popen(["open", path])
+        return {"ok": True, "path": path, "opened": True}
+    except (OSError, FileNotFoundError):
+        return {"ok": True, "path": path, "opened": False}

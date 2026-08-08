@@ -321,7 +321,28 @@ function UsagePane({ ctx }) {
             ]
           }, w.week + i)
         }),
-        jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: 'Weekly snapshots — kept locally, survives Ollama resets' })
+        jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: 'Weekly snapshots — kept locally, survives Ollama resets' }),
+        jsxs('div', { className: 'flex items-center gap-2 mt-2', children: [
+          jsx('button', {
+            className: cn(
+              'rounded-md border px-2 py-1 text-xs',
+              'border-(--ui-stroke-secondary) text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)'
+            ),
+            type: 'button',
+            onClick: () => {
+              haptic('tap')
+              ctx.rest('/usage/report/open', { method: 'POST' }).then(r => {
+                host.notify({ kind: r?.opened ? 'info' : 'warning', message: r?.opened ? `Report opened: ${r.path}` : `Report: ${r?.path}` })
+              }).catch(() => host.notify({ kind: 'warning', message: 'Could not open report' }))
+            },
+            children: 'Open report (MD)'
+          }),
+          jsx('a', {
+            className: 'text-xs text-(--ui-accent) hover:underline truncate',
+            href: `file://${data?.report_path || '~/.hermes/ollama-usage-report.md'}`,
+            children: '📄 full stats'
+          })
+        ]})
       ]
     }))
   }
