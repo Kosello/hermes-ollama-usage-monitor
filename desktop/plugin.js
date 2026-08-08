@@ -191,6 +191,7 @@ function UsagePane({ ctx }) {
   const { data, isLoading, refetch } = useUsage(ctx)
   const { data: hist } = useHistory(ctx)
   const { data: lifetime } = useLifetime(ctx)
+  const [reports, setReports] = useState(null)
   const qc = useQueryClient()
 
   // Load settings from storage (persists across reloads)
@@ -221,6 +222,10 @@ function UsagePane({ ctx }) {
     } else {
       setSettings(loadSettings())
     }
+    // Also load reports
+    ctx.rest('/usage/report').then(r => {
+      if (r?.ok) setReports(r)
+    }).catch(() => {})
     return () => { done = true }
   }, [])
 
@@ -653,6 +658,51 @@ function UsagePane({ ctx }) {
           }, w.week + i)
         }),
         jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: 'Weekly snapshots — kept locally, survives Ollama resets' })
+      ]
+    }))
+  }
+
+  // ── reports (monthly + lifetime links) ──
+  if (settings.history && reports && reports.ok !== false) {
+    const months = reports.months || []
+    rows.push(jsx(Collapsible, {
+      title: 'Reports',
+      defaultOpen: false,
+      children: [
+        months.length > 0 ? months.map(m =>
+          jsxs('div', {
+            className: 'flex items-center justify-between gap-2',
+            children: [
+              jsx('span', { className: 'truncate', children: m.month }),
+              jsx('button', {
+                className: 'text-xs text-(--ui-accent) hover:underline shrink-0',
+                onClick: () => {
+                  haptic('tap')
+                  ctx.rest('/usage/report/open-month', { method: 'POST', body: { path: m.path } }).then(r => {
+                    host.notify({ kind: r?.opened ? 'info' : 'warning', message: r?.opened ? `Opened ${m.month}` : m.path })
+                  }).catch(() => host.notify({ kind: 'warning', message: 'Could not open' }))
+                },
+                children: 'Open'
+              })
+            ]
+          }, m.month)
+        ) : jsx('div', { className: 'text-(--ui-text-quaternary)', children: 'No monthly reports yet' }),
+        reports.lifetime_path ? jsxs('div', {
+          className: 'flex items-center justify-between gap-2 border-t border-(--ui-stroke-secondary) pt-1 mt-1',
+          children: [
+            jsx('span', { className: 'font-medium', children: 'Lifetime' }),
+            jsx('button', {
+              className: 'text-xs text-(--ui-accent) hover:underline shrink-0',
+              onClick: () => {
+                haptic('tap')
+                ctx.rest('/usage/report/open-month', { method: 'POST', body: { path: reports.lifetime_path } }).then(r => {
+                  host.notify({ kind: r?.opened ? 'info' : 'warning', message: r?.opened ? 'Opened lifetime' : reports.lifetime_path })
+                }).catch(() => host.notify({ kind: 'warning', message: 'Could not open' }))
+              },
+              children: 'Open'
+            })
+          ]
+        }) : null
       ]
     }))
   }

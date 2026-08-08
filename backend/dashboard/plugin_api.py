@@ -42,6 +42,7 @@ HISTORY_FILE = Path.home() / ".hermes" / "ollama-usage-history.jsonl"
 HISTORY_MAX_WEEKS = 8
 SESSION_FILE = Path.home() / ".hermes" / "ollama-usage-sessions.jsonl"
 REPORT_FILE = Path.home() / ".hermes" / "ollama-usage-report.md"
+REPORTS_DIR = Path.home() / ".hermes" / "ollama-usage-reports"
 SESSION_LOG_CAP = 500
 
 _cache: dict = {"ts": 0, "data": None}
@@ -502,6 +503,7 @@ def _generate_report() -> str:
 
     Returns the report file path. The report is regenerated on every call
     from the two JSONL logs, so it always reflects everything captured.
+    Also generates per-month reports and a lifetime report.
     """
     weeks = []
     if HISTORY_FILE.exists():
@@ -523,13 +525,24 @@ def _generate_report() -> str:
             sessions.append(rec)
     sessions.sort(key=lambda s: s.get("ts") or "")
 
-    lines = []
-    lines.append("# Ollama Cloud Usage Stats")
-    lines.append("")
-    lines.append(f"_Generated {_utc_now().strftime('%Y-%m-%d %H:%M UTC')}_")
-    lines.append("")
-    lines.append("## Weekly overview")
-    lines.append("")
+    # Generate main report
+    _write_main_report(weeks, sessions)
+    # Generate per-month reports
+    _write_monthly_reports(weeks, sessions)
+    # Generate lifetime report
+    _write_lifetime_report(weeks, sessions)
+    return str(REPORT_FILE)
+
+
+def _write_main_report(weeks: list, sessions: list) -> None:
+    lines = [
+        "# Ollama Cloud Usage Stats",
+        "",
+        f"_Generated {_utc_now().strftime('%Y-%m-%d %H:%M UTC')}_",
+        "",
+        "## Weekly overview",
+        "",
+    ]
     if weeks:
         lines.append("| Week | Weekly used | Est. cost | Top model | Requests |")
         lines.append("|------|-------------|-----------|-----------|----------|")
@@ -539,46 +552,191 @@ def _generate_report() -> str:
             total = sum(m.get("requests") or 0 for m in models)
             cost = w.get("est_cost_consumed")
             cost_s = f"${cost:.2f}" if cost is not None else "?"
-            lines.append(
-                f"| {w.get('week')} | {w.get('weekly_used_pct')}% | {cost_s} | "
-                f"{top.get('model') or '-'} | {total} |"
-            )
+            lines.append(f"| {w.get('week')} | {w.get('weekly_used_pct')}% | {cost_s} | {top.get('model') or '-'} | {total} |")
     else:
-        lines.append("_No weekly snapshots yet — the plugin records one per ISO week._")
-    lines.append("")
-
-    lines.append("## All 5h sessions")
-    lines.append("")
+        lines.append("_No weekly snapshots yet._")
+    lines += ["", "## All 5h sessions", ""]
     if sessions:
-        for s in reversed(sessions[-50:]):  # newest 50 sessions
+        for s in reversed(sessions[-50:]):
             ts = s.get("ts", "")[:16].replace("T", " ")
             lines.append(f"### {ts} — session {s.get('session_used_pct')}% · weekly {s.get('weekly_used_pct')}%")
             lines.append("")
-            sm = s.get("session_models") or []
-            wm = s.get("weekly_models") or []
-            if sm:
-                lines.append("Session per model:")
-                lines.append("")
-                lines.append("| Model | Requests | Share |")
-                lines.append("|-------|----------|-------|")
-                for m in sm:
-                    lines.append(f"| {m.get('model')} | {m.get('requests')} | {m.get('share_pct')}% |")
-                lines.append("")
-            if wm:
-                lines.append("Weekly per model:")
-                lines.append("")
-                lines.append("| Model | Requests | Share |")
-                lines.append("|-------|----------|-------|")
-                for m in wm:
-                    lines.append(f"| {m.get('model')} | {m.get('requests')} | {m.get('share_pct')}% |")
-                lines.append("")
+            for label, key in [("Session", "session_models"), ("Weekly", "weekly_models")]:
+                mods = s.get(key) or []
+                if mods:
+                    lines += [f"{label} per model:", "", "| Model | Requests | Share |", "|-------|----------|-------|"]
+                    for m in mods:
+                        lines.append(f"| {m.get('model')} | {m.get('requests')} | {m.get('share_pct')}% |")
+                    lines.append("")
     else:
-        lines.append("_No session snapshots yet — recorded once per 5h window._")
+        lines.append("_No session snapshots yet._")
         lines.append("")
-
     REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
     REPORT_FILE.write_text("\n".join(lines))
-    return str(REPORT_FILE)
+
+
+def _write_monthly_reports(weeks: list, sessions: list) -> list:
+    """Generate one MD file per month in ~/.hermes/ollama-usage-reports/.
+    Returns list of {month, path} for the pane to link to."""
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Group weeks by month (week key is YYYY-MM-DD, month is YYYY-MM)
+    months_w: dict[str, list] = {}
+    for w in weeks:
+        wk = w.get("week") or ""
+        month = wk[:7]  # YYYY-MM
+        if month:
+            months_w.setdefault(month, []).append(w)
+
+    # Group sessions by month (ts starts with YYYY-MM)
+    months_s: dict[str, list] = {}
+    for s in sessions:
+        ts = s.get("ts") or ""
+        month = ts[:7]
+        if month:
+            months_s.setdefault(month, []).append(s)
+
+    all_months = sorted(set(list(months_w.keys()) + list(months_s.keys())), reverse=True)
+    result = []
+    for month in all_months:
+        mw = months_w.get(month, [])
+        ms = months_s.get(month, [])
+        lines = [
+            f"# Ollama Cloud Usage — {month}",
+            "",
+            f"_Generated {_utc_now().strftime('%Y-%m-%d %H:%M UTC')}_",
+            "",
+            "## Weekly overview",
+            "",
+        ]
+        if mw:
+            lines.append("| Week | Weekly used | Est. cost | Top model | Requests |")
+            lines.append("|------|-------------|-----------|-----------|----------|")
+            for w in mw:
+                models = w.get("models") or []
+                top = max(models, key=lambda m: m.get("share_pct") or 0) if models else {}
+                total = sum(m.get("requests") or 0 for m in models)
+                cost = w.get("est_cost_consumed")
+                cost_s = f"${cost:.2f}" if cost is not None else "?"
+                lines.append(f"| {w.get('week')} | {w.get('weekly_used_pct')}% | {cost_s} | {top.get('model') or '-'} | {total} |")
+        else:
+            lines.append("_No weekly snapshots._")
+        lines += ["", "## 5h sessions", ""]
+        if ms:
+            for s in ms:
+                ts = s.get("ts", "")[:16].replace("T", " ")
+                lines.append(f"### {ts} — session {s.get('session_used_pct')}% · weekly {s.get('weekly_used_pct')}%")
+                lines.append("")
+                for label, key in [("Session", "session_models"), ("Weekly", "weekly_models")]:
+                    mods = s.get(key) or []
+                    if mods:
+                        lines += [f"{label} per model:", "", "| Model | Requests | Share |", "|-------|----------|-------|"]
+                        for m in mods:
+                            lines.append(f"| {m.get('model')} | {m.get('requests')} | {m.get('share_pct')}% |")
+                        lines.append("")
+        else:
+            lines.append("_No session snapshots._")
+            lines.append("")
+
+        filepath = REPORTS_DIR / f"{month}.md"
+        filepath.write_text("\n".join(lines))
+        result.append({"month": month, "path": str(filepath)})
+
+    return result
+
+
+def _write_lifetime_report(weeks: list, sessions: list) -> str:
+    """Generate a single lifetime-stats MD file, regenerated every call."""
+    lt = _lifetime_from_records(weeks)
+    lines = [
+        "# Ollama Cloud Usage — Lifetime Stats",
+        "",
+        f"_Generated {_utc_now().strftime('%Y-%m-%d %H:%M UTC')}_",
+        "",
+        f"**{lt.get('weeks_count', 0)} weeks recorded · {lt.get('total_requests', 0)} total requests**",
+        "",
+        "## Per-model lifetime average cost per request",
+        "",
+    ]
+    models = lt.get("models") or []
+    if models:
+        lines.append("| Model | Requests | $/req | % of weekly budget | Total est. cost |")
+        lines.append("|-------|----------|-------|--------------------|-----------------|")
+        for m in models:
+            lines.append(
+                f"| {m['model']} | {m['requests']} | ${m['est_cost_per_req']:.4f} | "
+                f"{m['est_cost_per_req_pct']:.3f}% | ${m['est_cost']:.4f} |"
+            )
+        lines += [
+            "",
+            f"**Total est. cost: ${lt.get('est_total_cost', 0):.2f}**",
+            f"**Avg $/req across all: ${lt.get('est_avg_cost_per_req', 0):.4f}**",
+            "",
+        ]
+    else:
+        lines.append("_No data yet._")
+        lines.append("")
+
+    # Monthly summary table
+    months_w: dict[str, list] = {}
+    for w in weeks:
+        month = (w.get("week") or "")[:7]
+        if month:
+            months_w.setdefault(month, []).append(w)
+    if months_w:
+        lines += ["## Monthly summary", "", "| Month | Weeks | Total requests | Avg weekly used | Est. cost |", "|-------|-------|----------------|-----------------|-----------|"]
+        for month in sorted(months_w.keys(), reverse=True):
+            mw = months_w[month]
+            reqs = sum(sum((m.get("requests") or 0) for m in (w.get("models") or [])) for w in mw)
+            avg_used = sum(w.get("weekly_used_pct") or 0 for w in mw) / len(mw) if mw else 0
+            cost = sum(w.get("est_cost_consumed") or 0 for w in mw)
+            lines.append(f"| {month} | {len(mw)} | {reqs} | {avg_used:.1f}% | ${cost:.2f} |")
+        lines.append("")
+
+    filepath = REPORTS_DIR / "lifetime.md"
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    filepath.write_text("\n".join(lines))
+    return str(filepath)
+
+
+def _lifetime_from_records(weeks: list) -> dict:
+    """Aggregate lifetime stats from history records (same as _lifetime_stats but from a list)."""
+    if not weeks:
+        return {"ok": True, "weeks_count": 0, "models": []}
+    model_reqs: dict = {}
+    model_cost_wsum: dict = {}
+    for rec in weeks:
+        for m in rec.get("models") or []:
+            model = m.get("model")
+            reqs = m.get("requests") or 0
+            cpr = m.get("est_cost_per_req")
+            if not model or reqs <= 0:
+                continue
+            model_reqs[model] = model_reqs.get(model, 0) + reqs
+            if cpr is not None:
+                model_cost_wsum[model] = model_cost_wsum.get(model, 0.0) + cpr * reqs
+    total_reqs = sum(model_reqs.values())
+    total_cost = sum(model_cost_wsum.values())
+    weekly_budget = 20.0 / 4.33
+    models = []
+    for model in model_reqs:
+        reqs = model_reqs[model]
+        cpr = model_cost_wsum.get(model, 0.0) / reqs if reqs else 0.0
+        models.append({
+            "model": model, "requests": reqs,
+            "est_cost_per_req": round(cpr, 4),
+            "est_cost_per_req_pct": round(cpr / weekly_budget * 100.0, 4),
+            "est_cost": round(model_cost_wsum.get(model, 0.0), 4),
+        })
+    models.sort(key=lambda m: m.get("requests") or 0, reverse=True)
+    return {
+        "ok": True, "weeks_count": len(weeks),
+        "total_requests": total_reqs,
+        "est_total_cost": round(total_cost, 4),
+        "est_avg_cost_per_req": round(total_cost / total_reqs, 4) if total_reqs else 0.0,
+        "est_avg_cost_per_req_pct": round((total_cost / total_reqs) / weekly_budget * 100.0, 4) if total_reqs else 0.0,
+        "models": models,
+    }
 
 
 def _history() -> dict:
@@ -727,15 +885,36 @@ async def usage_lifetime():
 
 @router.get("/usage/report")
 async def usage_report():
-    """Generate (or refresh) the full stats MD report; returns its path."""
-    path = _generate_report()
-    return {"ok": True, "path": path}
+    """Generate (or refresh) all reports; returns paths."""
+    _generate_report()
+    # Build the response with monthly + lifetime paths
+    reports_dir = REPORTS_DIR
+    months = []
+    if reports_dir.exists():
+        for f in sorted(reports_dir.glob("*.md"), reverse=True):
+            if f.name != "lifetime.md":
+                months.append({"month": f.stem, "path": str(f)})
+    lifetime_path = str(reports_dir / "lifetime.md") if (reports_dir / "lifetime.md").exists() else None
+    return {"ok": True, "path": str(REPORT_FILE), "months": months, "lifetime_path": lifetime_path}
 
 
 @router.post("/usage/report/open")
 async def usage_report_open():
-    """Generate the report and open it in the default app (macOS 'open')."""
-    path = _generate_report()
+    """Generate all reports and open the main one in the default app."""
+    _generate_report()
+    try:
+        import subprocess as _sp
+        _sp.Popen(["open", str(REPORT_FILE)])
+        return {"ok": True, "path": str(REPORT_FILE), "opened": True}
+    except (OSError, FileNotFoundError):
+        return {"ok": True, "path": str(REPORT_FILE), "opened": False}
+
+
+@router.post("/usage/report/open-month")
+async def usage_report_open_month(path: str = ""):
+    """Open a specific monthly or lifetime report by path."""
+    if not path:
+        return {"ok": False, "error": "no path"}
     try:
         import subprocess as _sp
         _sp.Popen(["open", path])
