@@ -7,7 +7,7 @@
  */
 
 import { cn, haptic, host, PALETTE_AREA, Tip, useQuery, useQueryClient } from '@hermes/plugin-sdk'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'ollama-usage-monitor'
@@ -199,15 +199,19 @@ function UsagePane({ ctx }) {
   const [showSettings, setShowSettings] = useState(false)
 
   // Load on mount
-  useState(() => {
+  useEffect(() => {
+    let done = false
     if (ctx.storage) {
       ctx.storage.get('settings').then(s => {
-        setSettings({ ...DEFAULT_SETTINGS, ...s })
-      }).catch(() => setSettings(DEFAULT_SETTINGS))
+        if (!done) setSettings({ ...DEFAULT_SETTINGS, ...s })
+      }).catch(() => {
+        if (!done) setSettings(DEFAULT_SETTINGS)
+      })
     } else {
       setSettings(DEFAULT_SETTINGS)
     }
-  })
+    return () => { done = true }
+  }, [])
 
   const saveSetting = (key, val) => {
     const next = { ...settings, [key]: val }
