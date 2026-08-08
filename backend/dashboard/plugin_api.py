@@ -331,7 +331,7 @@ def _parse_usage(html: str) -> dict:
 
 
 def _real_token_averages() -> dict:
-    """Real per-model avg tokens/request from Hermes state.db (last 7 days).
+    """Real per-model avg tokens/request from Hermes state.db (all-time).
 
     Returns {model: (avg_input, avg_output, avg_cache_read)}. Empty dict when
     the DB is unavailable — callers fall back to the fixed assumption.
@@ -352,10 +352,8 @@ def _real_token_averages() -> dict:
                 WHERE billing_provider = 'ollama-cloud'
                   AND api_call_count > 0
                   AND input_tokens > 0
-                  AND started_at >= ?
                 GROUP BY model
                 """,
-                (time.time() - 7 * 86400,),
             ).fetchall()
             return {r[0]: (r[1], r[2], r[3]) for r in rows}
         finally:
@@ -369,7 +367,7 @@ def _api_assumption_text(token_avgs: dict) -> str:
     if not token_avgs:
         return "~1000 in + 500 out tokens/req (fallback — no state.db data)"
     n = len(token_avgs)
-    return f"real token averages from Hermes state.db (last 7d, {n} models), cache-aware pricing"
+    return f"real token averages from Hermes state.db (all-time, {n} models), cache-aware pricing"
 
 
 def _week_key(iso_str: str | None) -> str | None:
