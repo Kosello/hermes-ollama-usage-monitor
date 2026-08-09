@@ -3,8 +3,7 @@
 > **⚠️ WORK IN PROGRESS — expect bugs.** This plugin is under active development.
 > The core usage scraper and desktop chip/pane work, but you may hit rough edges
 > (stale cache, parser breakage when Ollama changes their HTML, price-chain
-> mismatches). If something breaks, [open an issue](https://github.com/Kosello/hermes-ollama-usage-monitor/issues)
-> or just re-paste a fresh cookie and restart Hermes.
+> mismatches). If something breaks, [open an issue](https://github.com/Kosello/hermes-ollama-usage-monitor/issues).
 
 Live Ollama Cloud usage in Hermes Agent — session & weekly quotas, per-model request counts, weekly history, average cost per request, and threshold alerts, right in the desktop app. Plus a **standalone CLI** that works without Hermes.
 
@@ -35,7 +34,7 @@ Then add the desktop plugin (`desktop/plugin.js` → `~/.hermes/desktop-plugins/
 
 ## Why
 
-Ollama Cloud has **no usage API** — the only source is the web dashboard at [ollama.com/settings](https://ollama.com/settings). This plugin scrapes that page with your session cookie (same approach as the community [`/ollama` slash command](https://github.com/3L0935/hermes-plugins)) and adds a live desktop UI on top. Ollama's dashboard forgets everything when the week resets — this plugin keeps a **local history** that survives resets.
+Ollama Cloud exposes a **JSON usage API** at `ollama.com/api/usage` — this plugin uses it as the primary data source. For the plan tier (Pro/Free/Max), which the API doesn't expose, it falls back to a lightweight cookie scrape of the settings page. The cookie path is also kept as a full fallback if the API key isn't configured. Ollama's dashboard forgets everything when the week resets — this plugin keeps a **local history** that survives resets.
 
 ## Install
 
@@ -56,15 +55,36 @@ cp desktop/plugin.js ~/.hermes/desktop-plugins/ollama-usage-monitor/
 
 Then in the app: **⌘K → Reload desktop plugins**
 
-### 3. Cookie
+### 3. API key (recommended — no cookie needed)
 
-The plugin reads your Ollama Cloud session cookie from **either**:
+Ollama exposes a JSON API at `https://ollama.com/api/usage`. You need an API key:
+
+1. Log in to [ollama.com](https://ollama.com)
+2. Open DevTools (`F12` or `⌘+Option+I`) → **Network** tab
+3. Navigate to [ollama.com/settings](https://ollama.com/settings)
+4. Find the request to `/api/usage` — look at the `Authorization` header
+5. Copy the key (format: `xxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxx`)
+
+Store it:
+
+```bash
+echo 'YOUR_API_KEY' > ~/.hermes/ollama_api_key.txt
+chmod 600 ~/.hermes/ollama_api_key.txt
+```
+
+Or via environment variable: `export OLLAMA_API_KEY=YOUR_API_KEY`
+
+**The API key doesn't expire with browser sessions** — it's a persistent credential tied to your account, so you set it once and forget it.
+
+### 4. Cookie (optional fallback — for plan tier detection)
+
+The API doesn't expose your plan tier (Pro/Free/Max). The plugin tries to infer it from the cookie. If no cookie is available, it defaults to Pro budget ($20/mo). To set it up:
 
 - **macOS Keychain** (recommended on macOS):
   ```bash
   security add-generic-password -s hermes-ollama-cookie -a ollama -w '<cookie>' -U
   ```
-- **or a plain file** (works on any OS — Linux, Windows, etc.):
+- **or a plain file** (works on any OS):
   ```bash
   echo '__Secure-session=<value>' > ~/.hermes/ollama_cookie.txt
   chmod 600 ~/.hermes/ollama_cookie.txt
@@ -82,14 +102,14 @@ The plugin reads your Ollama Cloud session cookie from **either**:
    - The cookie is **HttpOnly** (can't be read via JavaScript), so DevTools is the only way
 5. Paste it into the file or Keychain command above (without the `__Secure-session=` prefix — the plugin adds that automatically)
 
-**Note:** The cookie expires periodically. If the plugin shows "Unavailable", repeat steps 3–5 with the fresh value.
+**Note:** The cookie expires periodically (roughly every 2 months). If the plugin shows "Unavailable" and you're using cookie-only mode, repeat steps 3–5 with the fresh value. With the API key configured, the cookie is only needed for plan tier detection.
 
 **Storage selection** via env var `OLLAMA_COOKIE_SOURCE`:
 - `auto` (default) — Keychain if a cookie is stored there, otherwise the file
 - `keychain` — Keychain only (errors if empty)
 - `file` — file only (no Keychain dependency)
 
-### 4. Restart
+### 5. Restart
 
 ```bash
 hermes gateway restart
@@ -104,7 +124,7 @@ Then in the desktop app: **⌘K → Reload desktop plugins**.
 > gateway process and the desktop renderer cache module state separately
 > and a hot reload doesn't always clear both.
 
-### 5. Optional: automatic cookie refresh (browser extension)
+### 6. Optional: automatic cookie refresh (browser extension)
 
 The plugin works fully with the manual cookie paste above — a fresh cookie is
 only needed roughly every 2 months when the session expires. If you want that
@@ -125,7 +145,7 @@ Then load the extension (see its README), enable it, and paste the token.
 **The extension is opt-in and disabled by default.** Without it, everything
 above still works — you just re-paste the cookie manually when it expires.
 
-### 6. Optional: alerts + daily line (cron)
+### 7. Optional: alerts + daily line (cron)
 
 ```bash
 # copy the helper scripts
