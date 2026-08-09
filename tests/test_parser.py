@@ -8,7 +8,10 @@ Loads a saved HTML fixture and asserts the parser extracts:
   - cost estimates
 """
 import importlib.util
+import json
+import sqlite3
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -25,6 +28,9 @@ _RouterStub = type("APIRouter", (), {
 })
 _fastapi.APIRouter = _RouterStub
 sys.modules["fastapi"] = _fastapi
+_pydantic = types.ModuleType("pydantic")
+_pydantic.BaseModel = type("BaseModel", (), {})
+sys.modules["pydantic"] = _pydantic
 
 spec = importlib.util.spec_from_file_location("plugin_api", BACKEND)
 mod = importlib.util.module_from_spec(spec)
@@ -36,7 +42,10 @@ def main() -> int:
     # Deterministic: stub out state.db so the 1000/500 fallback is exercised
     # regardless of the machine running the test (CI has no state.db), and
     # stub the price chain so no network call happens (CI has no network).
+    real_token_averages = mod._real_token_averages
+    real_global_token_average = mod._real_global_token_average
     mod._real_token_averages = lambda: {}
+    mod._real_global_token_average = lambda: None
     mod._resolve_api_prices = lambda: (mod._BUILTIN_PRICES, "builtin defaults")
     data = mod._parse_usage(html)
 
@@ -61,22 +70,115 @@ def main() -> int:
     assert by["deepseek-v4-flash:0731"]["requests"] == 240
     assert by["minimax-m3"]["requests"] == 12
 
-    # Cost estimates present and sane
-    assert data["est_weekly_budget"] is not None
-    assert data["est_cost_consumed"] > 0
-    assert by["glm-5.2"]["est_cost_per_req"] > 0
-    assert by["glm-5.2"]["est_cost_per_req_pct"] > 0
+    # Fixed subscription economics: quota % is never treated as money spent.
+    assert abs(data["subscription_monthly_cost"] - 20.0) < 0.001
+    assert abs(data["subscription_weekly_equivalent"] - 4.5997) < 0.001
+    assert data["effective_subscription_cost_per_req"] > 0
+    assert by["glm-5.2"]["est_cost_per_req_pct"] is None
 
     # Real API price comparison (fixture: glm-5.2, deepseek-v4-flash:0731, minimax-m3)
-    assert data["api_weekly_total"] > 0, data["api_weekly_total"]
-    assert by["glm-5.2"]["api_cost_per_req"] == 0.0036, by["glm-5.2"]["api_cost_per_req"]
-    assert abs(by["glm-5.2"]["api_weekly_cost"] - 1.9944) < 0.001, by["glm-5.2"]["api_weekly_cost"]
-    assert by["minimax-m3"]["api_cost_per_req"] == 0.00072, by["minimax-m3"]["api_cost_per_req"]
-    assert data["api_assumption"].startswith("~1000 in + 500 out"), data["api_assumption"]
-    # Ollama cost as % of API price — present and sane
-    assert by["glm-5.2"]["api_cost_pct"] is not None, by["glm-5.2"]["api_cost_pct"]
-    assert by["glm-5.2"]["api_cost_pct"] > 0, by["glm-5.2"]["api_cost_pct"]
+    assert data["api_window_total"] > 0, data["api_window_total"]
+    assert by["glm-5.2"]["api_cost_per_req"] == 0.00018, by["glm-5.2"]["api_cost_per_req"]
+    assert by["glm-5.2"]["api_effective_per_1m"] == 0.12, by["glm-5.2"]["api_effective_per_1m"]
+    assert abs(by["glm-5.2"]["api_weekly_cost"] - 0.09972) < 0.001, by["glm-5.2"]["api_weekly_cost"]
+    assert by["minimax-m3"]["api_cost_per_req"] == 0.0009, by["minimax-m3"]["api_cost_per_req"]
+    assert "fixed fallback" in data["api_assumption"], data["api_assumption"]
+    # Per-model quota cost is unknowable; only the overall plan/API comparison exists.
+    assert by["glm-5.2"]["api_cost_pct"] is None
     assert data["api_total_pct"] is not None and data["api_total_pct"] > 0, data["api_total_pct"]
+    assert data["api_monthly_proj"] is None
+
+    # Official API exposes no reset timestamp. Activity period end is not a
+    # quota reset and must never be extrapolated from usage percentage.
+    api_data = mod._api_to_usage({
+        "activity": {"period": {"ending_at": "2026-08-09T17:30:58.790970649Z"}},
+        "limits": {
+            "session": {"usage": 0.2, "models": []},
+            "weekly": {"usage": 0.4, "models": []},
+        },
+    })
+    assert api_data["session_reset_iso"] is None
+    assert api_data["weekly_reset_iso"] is None
+    assert api_data["reset_unavailable"] is True
+
+    # Free tier must not divide by zero.
+    free = {"plan": "Free", "weekly_used_pct": 50.0,
+            "weekly_models": [{"model": "gpt-oss:120b", "requests": 2, "share_pct": 100.0}]}
+    mod._enrich_with_costs(free)
+    assert free["subscription_weekly_equivalent"] == 0.0
+    assert free["effective_subscription_cost_per_req"] == 0.0
+    # A missing published cache rate falls back to the input rate, never free cache.
+    assert free["weekly_models"][0]["api_cache_price_published"] is False
+    assert free["weekly_models"][0]["api_cache_per_1m"] == free["weekly_models"][0]["api_input_per_1m"]
+
+    # Canonical Hermes usage keeps uncached input and cache-read input in
+    # separate buckets. Do not subtract cache from input a second time.
+    mod._resolve_api_prices = lambda: ({"gpt-oss:120b": (0.037, 0.17, None)}, "test")
+    mod._resolve_token_averages = lambda overrides: ({"gpt-oss:120b": (1000, 500, 500)}, "test")
+    cached = {"plan": "Pro", "weekly_used_pct": 1.0,
+              "weekly_models": [{"model": "gpt-oss:120b", "requests": 2, "share_pct": 100.0}]}
+    mod._enrich_with_costs(cached)
+    cm = cached["weekly_models"][0]
+    assert abs(cm["api_cost_per_req"] - 0.0001405) < 0.000001, cm["api_cost_per_req"]
+    assert cm["api_effective_per_1m"] == 0.07025, cm["api_effective_per_1m"]
+    assert cm["cache_hit_pct"] == 33.3, cm["cache_hit_pct"]
+    assert cm["total_prompt_tokens"] == 3000
+
+    # Partial pricing coverage must not be presented as a complete total or
+    # feed savings/break-even calculations.
+    mod._resolve_api_prices = lambda: ({"priced": (1.0, 1.0, 1.0)}, "test")
+    mod._resolve_token_averages = lambda overrides: ({}, "fallback")
+    partial = {"plan": "Pro", "weekly_used_pct": 1.0, "weekly_models": [
+        {"model": "priced", "requests": 1, "share_pct": 50.0},
+        {"model": "unpriced", "requests": 1, "share_pct": 50.0},
+    ]}
+    mod._enrich_with_costs(partial)
+    assert partial["api_price_coverage_pct"] == 50.0
+    assert partial["api_known_window_total"] is not None
+    assert partial["api_window_total"] is None
+    assert partial["api_total_pct"] is None
+
+    # Documented dictionary overrides normalize to numeric tuples.
+    with tempfile.TemporaryDirectory() as td:
+        override_path = Path(td) / "prices.json"
+        override_path.write_text(json.dumps({"models": {
+            "demo": {"input": 1.0, "output": 2.0, "cache_read": 0.25}
+        }}))
+        old_override = mod.PRICE_OVERRIDE_FILE
+        mod.PRICE_OVERRIDE_FILE = override_path
+        try:
+            assert mod._load_manual_price_overrides()["prices"]["demo"] == (1.0, 2.0, 0.25)
+        finally:
+            mod.PRICE_OVERRIDE_FILE = old_override
+
+    # Modern per-model accounting wins over legacy session attribution.
+    with tempfile.TemporaryDirectory() as td:
+        home = Path(td)
+        db_dir = home / ".hermes"
+        db_dir.mkdir()
+        conn = sqlite3.connect(db_dir / "state.db")
+        conn.executescript("""
+            CREATE TABLE session_model_usage (
+              model TEXT, billing_provider TEXT, api_call_count INTEGER,
+              input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER
+            );
+            CREATE TABLE sessions (
+              model TEXT, billing_provider TEXT, api_call_count INTEGER,
+              input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER
+            );
+            INSERT INTO session_model_usage VALUES ('modern', 'ollama-cloud', 2, 200, 40, 600);
+            INSERT INTO sessions VALUES ('legacy', 'ollama-cloud', 1, 9999, 9999, 9999);
+        """)
+        conn.commit()
+        conn.close()
+        real_state_db = mod.STATE_DB
+        mod.STATE_DB = db_dir / "state.db"
+        try:
+            avgs = real_token_averages()
+            assert avgs == {"modern": (100.0, 20.0, 300.0)}, avgs
+            assert real_global_token_average() == (100.0, 20.0, 300.0)
+        finally:
+            mod.STATE_DB = real_state_db
 
     print("✅ parser smoke test passed")
     print(f"   plan={data['plan']} session={data['session_used_pct']}% weekly={data['weekly_used_pct']}%")

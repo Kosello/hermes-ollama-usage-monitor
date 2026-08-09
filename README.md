@@ -5,7 +5,7 @@
 > (stale cache, parser breakage when Ollama changes their HTML, price-chain
 > mismatches). If something breaks, [open an issue](https://github.com/Kosello/hermes-ollama-usage-monitor/issues).
 
-Live Ollama Cloud usage in Hermes Agent — session & weekly quotas, per-model request counts, weekly history, average cost per request, and threshold alerts, right in the desktop app. Plus a **standalone CLI** that works without Hermes.
+Live Ollama Cloud usage in Hermes Agent — session & weekly quotas, per-model request counts, weekly history, honest subscription/API comparisons, and threshold alerts, right in the desktop app. Plus a **standalone CLI** that works without Hermes.
 
 ![Ollama Cloud](https://img.shields.io/badge/ollama-cloud-000000?logo=ollama&logoColor=white)
 ![CI](https://github.com/Kosello/hermes-ollama-usage-monitor/actions/workflows/ci.yml/badge.svg)
@@ -25,8 +25,9 @@ Then add the desktop plugin (`desktop/plugin.js` → `~/.hermes/desktop-plugins/
 - **Statusbar chip** — always-visible `Pro S25% W35%` summary, color-coded (yellow ≥75%, red ≥90%)
 - **Desktop pane** — full details:
   - Session & weekly usage % + reset times
-  - **Per-model breakdown** — request counts and each model's share of the usage bar (session + weekly)
-  - **Avg cost per request** — estimate in $ and % of weekly budget, per model
+  - **Per-model breakdown** — request counts and request share (session + weekly)
+  - **API-equivalent cost** — estimated **$/request** and cache-aware effective **$/1M tokens**
+  - **Effective subscription cost** — fixed plan price allocated across all requests, never misrepresented as per-model quota cost
   - **Weekly history** — last 8 weeks of usage snapshots with trend arrow (↑/↓/→)
 - **Threshold alerts** — macOS notification when weekly usage crosses 75% (warning) / 90% (critical), once per threshold per week
 - **Daily usage line** — one short summary in chat every morning (`📊 Ollama Cloud: weekly 44.7% · session 81.6% · top: glm-5.2`)
@@ -149,39 +150,47 @@ cp scripts/ollama_usage_daily.py ~/.hermes/scripts/
 
 The watchdog is **silent** until a threshold is crossed (no token cost, no spam). It also snapshots weekly usage into the history file, so history is recorded even when the desktop app is closed.
 
-## Cost estimate methodology
+## Cost methodology
 
-Ollama Cloud bills by GPU-time utilization, not tokens. The per-request cost is a rough proxy ("π✕ Daumen"):
+Ollama exposes aggregate quota utilization and per-model request counts, but **not** current-window token counts, per-request quota usage, per-model quota consumption, or its internal cache weighting. The plugin therefore keeps two different measurements separate.
 
+### Fixed subscription economics
+
+```text
+7-day plan equivalent = monthly plan price / 4.348
+effective plan $/req   = 7-day plan equivalent / current-window requests
 ```
-weekly_budget   = plan_price / 4.33          # Pro $20/mo ≈ $4.62/wk
-cost_consumed   = weekly_budget × weekly_used%
-model_cost      = cost_consumed × model_share%
-cost_per_req    = model_cost / requests
-cost_per_req_%  = cost_per_req / weekly_budget × 100
+
+This is an allocation of the fixed subscription fee, not money “consumed” by the quota percentage. There is deliberately no per-model Ollama cost: the public API does not provide enough data to calculate one.
+
+### API-equivalent estimate
+
+```text
+$/req = uncached_input × input_rate
+      + cached_input   × cache_rate
+      + output         × output_rate
+
+effective $/1M = $/req / ((uncached_input + cached_input + output) / 1,000,000)
 ```
 
-The model share% comes straight from Ollama's own usage bar segments, which already reflect the GPU-time weighting — so heavier models (glm-5.2 = High) show higher per-request cost than lighter ones (deepseek-v4-flash = Medium).
-
-### "What would this cost on the native APIs?" — fallback chain
-
-The API-equivalent cost uses real token counts × official API list prices, resolved through a fallback chain — the first source that has data wins, manual is the last resort when everything else fails:
+Historical Hermes usage stores uncached input and cache-read input as separate canonical buckets. Request counts come from Ollama. Token mix comes from historical Hermes `session_model_usage` averages; an unknown model uses the request-weighted all-model average, then a 1000-input/500-output fallback when no local data exists. Prices use this per-model chain:
 
 | Level | Prices (per 1M tokens) | Tokens per request |
 |---|---|---|
-| 1 | **Manual override file** `~/.hermes/ollama-usage-prices.json` | **Manual override** (same file, `tokens_per_request` key) |
-| 2 | **Live OpenRouter fetch** (vendor list prices, cached 24h) | **Hermes state.db** (real per-model averages) |
-| 3 | Builtin defaults (bundled table) | Cross-model mean of known models |
+| 1 | **Manual override** for that model in `~/.hermes/ollama-usage-prices.json` | **Manual override** for that model (`tokens_per_request`) |
+| 2 | **Live OpenRouter fetch** (cached 24h) | **Hermes state.db** per-model average |
+| 3 | Builtin defaults (bundled table) | Request-weighted all-model `state.db` average |
 | 4 | — | 1000 in + 500 out assumption |
 
 The pane shows which source was used: `Prices: OpenRouter (live) · Tokens: Hermes state.db`. To pin prices yourself, copy `ollama-usage-prices.example.json` → `~/.hermes/ollama-usage-prices.json` and edit; delete the file to revert to automatic.
 
-Cache-hit input tokens are billed at the discounted cache rate (OpenRouter reports these per model).
+Manual entries merge on top of automatic data; a partial override does not hide other models. Cache-hit input uses the published cache rate. If no cache rate is published, the normal input rate is used — missing pricing never means free cache.
 
 ## Caveats
 
 - **Cookie scraping is brittle** — if Ollama changes their settings page markup or the cookie expires, the plugin shows "Unavailable". Re-extract the cookie and it's back.
 - The cookie is a login token — keep it private (Keychain, or `chmod 600` on the file).
+- API-equivalent values are estimates based on historical token mix, not Ollama's current-window token telemetry. They explain pay-per-token economics; they do not explain Ollama's proprietary quota percentage exactly.
 - Works only in the Hermes **desktop** app (the backend loads via the gateway; the chip/pane need the desktop UI). The `/ollama` slash command from the [community plugin](https://github.com/3L0935/hermes-plugins) covers CLI/TUI. For non-Hermes users, see the **Standalone CLI** below.
 
 ## Standalone CLI (no Hermes needed)
@@ -203,22 +212,26 @@ python standalone/ollama-cloud-watch.py --alert
 
 # Generate full stats MD report
 python standalone/ollama-cloud-watch.py --report --open
+
+# Serve the self-contained dashboard
+python standalone/ollama-cloud-watch.py --serve --port 8080
 ```
 
-**Cookie setup** (same as the plugin):
+**Recommended API-key setup:**
 ```bash
-# macOS Keychain:
-security add-generic-password -s ollama-cloud-watch -a ollama -w '<cookie>' -U
-# Or plain file:
-echo '__Secure-session=<value>' > ~/.ollama-cloud-cookie.txt
+install -m 600 /dev/null ~/.ollama-cloud-api-key.txt
+# Paste the key into that file, or export OLLAMA_API_KEY.
 ```
+
+The cookie/Keychain setup remains available as a fallback if the official API
+cannot be used.
 
 **Cron examples (non-macOS or without Hermes):**
 ```bash
 # Watchdog every 30 min
-*/30 * * * * python /path/to/ollama-cloud-watch.py --alert --cookie ~/.ollama-cloud-cookie.txt
+*/30 * * * * python /path/to/ollama-cloud-watch.py --alert
 # Daily summary at 9am
-0 9 * * * python /path/to/ollama-cloud-watch.py --history --cookie ~/.ollama-cloud-cookie.txt
+0 9 * * * python /path/to/ollama-cloud-watch.py --history
 ```
 
 History is written to `~/.ollama-cloud-history.jsonl` and sessions to `~/.ollama-cloud-sessions.jsonl` — independent from the Hermes plugin's files.

@@ -2,40 +2,51 @@
  * Ollama Cloud Usage — Hermes desktop plugin.
  *
  * Shows Ollama Cloud session/weekly usage in a statusbar chip and a pane.
- * Data comes from the plugin Python backend at /api/plugins/ollama-usage-monitor/usage
- * (cookie-based scrape of ollama.com/settings, same as the /ollama slash command).
+ * Data comes from the official Ollama usage API through the plugin backend;
+ * settings-page scraping is only a fallback.
  */
 
-import { cn, haptic, host, PALETTE_AREA, Tip, useQuery, useQueryClient } from '@hermes/plugin-sdk'
+import {
+  cn, haptic, host, PALETTE_AREA, ROUTES_AREA, SIDEBAR_NAV_AREA,
+  Tip, useQuery, useQueryClient
+} from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'ollama-usage-monitor'
 const REFRESH_MS = 60000
+const SETTINGS_VERSION = 2
 
 // ── section settings (persisted via ctx.storage) ──────────────────────────
 const SECTION_KEYS = [
   'savings', 'limits', 'session_models', 'weekly_models',
   'cost_week', 'cost_lifetime', 'cache_hit', 'token_volume',
-  'api_cost', 'cost_efficiency', 'break_even', 'monthly_proj',
-  'history',
+  'api_cost', 'cost_efficiency', 'break_even',
+  'history', 'reports',
 ]
 const SECTION_LABELS = {
-  savings:        'Your savings headline',
+  savings:        'Subscription vs API headline',
   limits:         'Limits',
   session_models:'Session — per model',
   weekly_models: 'Weekly — per model',
-  cost_week:      'Avg cost per request (this week)',
-  cost_lifetime:  'Avg cost per request (lifetime)',
+  cost_week:      'Effective subscription cost',
+  cost_lifetime:  'Effective subscription cost (history)',
   cache_hit:      'Cache hit % per model',
-  token_volume:   'Token volume per model',
+  token_volume:   'Estimated token volume',
   api_cost:       'API equivalent cost',
-  cost_efficiency:'Cost efficiency',
-  break_even:     'Break-even comparison',
-  monthly_proj:   'Monthly projection',
+  cost_efficiency:'Plan vs API',
+  break_even:     'Break-even usage',
   history:        'Weekly history',
+  reports:        'Reports',
 }
 const DEFAULT_SETTINGS = Object.fromEntries(SECTION_KEYS.map(k => [k, true]))
+
+function normalizeSettings(value) {
+  if (!value || value._version !== SETTINGS_VERSION) {
+    return { ...DEFAULT_SETTINGS, _version: SETTINGS_VERSION }
+  }
+  return { ...DEFAULT_SETTINGS, ...value, _version: SETTINGS_VERSION }
+}
 
 // ── data hooks ────────────────────────────────────────────────────────────
 function useUsage(ctx) {
@@ -89,6 +100,19 @@ function fmtTokens(n) {
   return String(n)
 }
 
+function fmtUsd(n, digits = 4) {
+  if (n == null) return '?'
+  const d = Math.abs(n) < 0.0001 && n !== 0 ? 6 : digits
+  return Number(n).toFixed(d)
+}
+
+function fmtPerMillion(n) {
+  if (n == null) return '?'
+  if (Math.abs(n) >= 10) return Number(n).toFixed(1)
+  if (Math.abs(n) >= 1) return Number(n).toFixed(2)
+  return Number(n).toFixed(3)
+}
+
 // ── collapsible section ───────────────────────────────────────────────────
 function Collapsible({ title, defaultOpen = false, children }) {
   const [open, setOpen] = useState(defaultOpen)
@@ -116,22 +140,30 @@ function Collapsible({ title, defaultOpen = false, children }) {
 function Toggle({ label, checked, onChange }) {
   return jsxs('button', {
     type: 'button',
+    'aria-pressed': checked,
     className: 'flex items-center gap-2 px-1 py-0.5 text-left hover:bg-(--chrome-action-hover) rounded w-full',
     onClick: () => { haptic('tap'); onChange(!checked) },
     children: [
       jsx('span', {
         className: cn(
-          'inline-flex h-3.5 w-6 shrink-0 items-center rounded-full transition-colors',
-          checked ? 'bg-(--ui-accent)' : 'bg-(--ui-stroke-secondary)'
+          'inline-flex h-3.5 w-6 shrink-0 items-center rounded-full transition-colors'
         ),
+        style: {
+          backgroundColor: checked ? 'var(--ui-accent)' : 'var(--ui-stroke-secondary)',
+          border: '1px solid var(--ui-stroke-secondary)'
+        },
         children: jsx('span', {
           className: cn(
-            'inline-block h-2.5 w-2.5 rounded-full bg-white transition-transform',
-            checked ? 'translate-x-3' : 'translate-x-0.5'
-          )
+            'inline-block h-2.5 w-2.5 rounded-full bg-white transition-transform'
+          ),
+          style: { transform: checked ? 'translateX(12px)' : 'translateX(2px)' }
         })
       }),
-      jsx('span', { className: 'text-xs text-(--ui-text-secondary) truncate', children: label })
+      jsx('span', { className: 'min-w-0 flex-1 truncate text-xs text-(--ui-text-secondary)', children: label }),
+      jsx('span', {
+        className: 'shrink-0 text-[0.625rem] text-(--ui-text-quaternary)',
+        children: checked ? 'On' : 'Off'
+      })
     ]
   })
 }
@@ -169,7 +201,9 @@ function UsageChip({ ctx }) {
         }),
         jsx('div', {
           className: 'text-(--ui-text-quaternary)',
-          children: data?.session_reset ? `Session resets ${data.session_reset}` : ''
+          children: data?.reset_unavailable
+            ? 'Reset timestamps are not exposed by the usage API'
+            : (data?.session_reset ? `Session resets ${data.session_reset}` : '')
         })
       ]
     }),
@@ -181,13 +215,13 @@ function UsageChip({ ctx }) {
       type: 'button',
       title: 'Ollama Cloud usage — click to refresh',
       onClick: () => { haptic('tap'); host.notify({ kind: 'info', message: label }) },
-      children: jsx('span', { className: pctColor(session), children: label })
+      children: jsx('span', { className: pctColor(Math.max(session ?? 0, weekly ?? 0)), children: label })
     })
   })
 }
 
 // ── pane ──────────────────────────────────────────────────────────────────
-function UsagePane({ ctx }) {
+function UsagePane({ ctx, dashboard = false }) {
   const { data, isLoading, refetch } = useUsage(ctx)
   const { data: hist } = useHistory(ctx)
   const { data: lifetime } = useLifetime(ctx)
@@ -205,20 +239,20 @@ function UsagePane({ ctx }) {
     const loadSettings = () => {
       try {
         const raw = localStorage.getItem('ollama-usage-settings')
-        if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }
+        if (raw) return normalizeSettings(JSON.parse(raw))
       } catch (e) { /* ignore */ }
-      return DEFAULT_SETTINGS
+      return normalizeSettings(null)
     }
     if (ctx.storage && typeof ctx.storage.get === 'function') {
       const result = ctx.storage.get('settings')
       if (result && typeof result.then === 'function') {
         result.then(s => {
-          if (!done) setSettings({ ...DEFAULT_SETTINGS, ...s })
+          if (!done) setSettings(normalizeSettings(s))
         }).catch(() => {
           if (!done) setSettings(loadSettings())
         })
       } else {
-        setSettings({ ...DEFAULT_SETTINGS, ...result })
+        setSettings(normalizeSettings(result))
       }
     } else {
       setSettings(loadSettings())
@@ -234,15 +268,24 @@ function UsagePane({ ctx }) {
     return () => { done = true }
   }, [])
 
-  const saveSetting = (key, val) => {
-    const next = { ...settings, [key]: val }
-    setSettings(next)
+  const saveSettings = next => {
+    const normalized = { ...next, _version: SETTINGS_VERSION }
+    setSettings(normalized)
     try {
       if (ctx.storage && typeof ctx.storage.set === 'function') {
-        ctx.storage.set('settings', next)
+        ctx.storage.set('settings', normalized)
       }
-      localStorage.setItem('ollama-usage-settings', JSON.stringify(next))
+      localStorage.setItem('ollama-usage-settings', JSON.stringify(normalized))
     } catch (e) { /* ignore */ }
+  }
+
+  const saveSetting = (key, val) => saveSettings({ ...settings, [key]: val })
+
+  const setAllSections = enabled => {
+    saveSettings({
+      ...settings,
+      ...Object.fromEntries(SECTION_KEYS.map(key => [key, enabled]))
+    })
   }
 
   const refresh = () => {
@@ -289,7 +332,26 @@ function UsagePane({ ctx }) {
           ]
         }),
         jsx('div', { className: 'h-px bg-(--ui-stroke-secondary) my-1' }),
-        jsx('div', { className: 'font-medium text-xs mb-1', children: 'Sections' }),
+        jsxs('div', {
+          className: 'mb-1 flex items-center justify-between gap-2',
+          children: [
+            jsx('div', { className: 'font-medium text-xs', children: 'Sections' }),
+            jsxs('div', { className: 'flex gap-2', children: [
+              jsx('button', {
+                type: 'button',
+                className: 'text-xs text-(--ui-accent) hover:underline',
+                onClick: () => setAllSections(true),
+                children: 'Show all'
+              }),
+              jsx('button', {
+                type: 'button',
+                className: 'text-xs text-(--ui-text-quaternary) hover:underline',
+                onClick: () => setAllSections(false),
+                children: 'Hide all'
+              })
+            ]})
+          ]
+        }),
         ...SECTION_KEYS.map(k =>
           jsx(Toggle, {
             label: SECTION_LABELS[k],
@@ -333,23 +395,28 @@ function UsagePane({ ctx }) {
       ]
     }))
 
-    // ── savings headline ──
-    if (settings.savings && data.api_savings != null && data.api_savings > 0) {
+    // ── subscription vs API headline ──
+    if (settings.savings && data.api_savings_vs_plan != null && data.api_window_total != null) {
+      const subscriptionWins = data.api_savings_vs_plan >= 0
       rows.push(jsxs('div', {
         className: 'mt-2 border border-(--ui-stroke-secondary) rounded p-2 text-xs',
         children: [
           jsxs('div', {
             className: 'flex items-center justify-between',
             children: [
-              jsx('span', { className: 'text-(--ui-text-secondary)', children: '💰 You saved this week' }),
-              jsx('span', { className: 'font-bold text-(--ui-text-primary)', children: `$${data.api_savings.toFixed(0)}` })
+              jsx('span', {
+                className: 'text-(--ui-text-secondary)',
+                children: subscriptionWins ? 'Plan equivalent below API estimate' : 'API estimate below plan equivalent so far'
+              }),
+              jsx('span', {
+                className: 'font-bold text-(--ui-text-primary)',
+                children: `$${Math.abs(data.api_savings_vs_plan).toFixed(2)}`
+              })
             ]
           }),
-          jsxs('div', {
+          jsx('div', {
             className: 'text-(--ui-text-quaternary) mt-0.5',
-            children: [
-              `API $${data.api_weekly_total.toFixed(0)} · Ollama est. $${(data.est_cost_consumed ?? 0).toFixed(2)}`
-            ]
+            children: `API est. $${data.api_window_total.toFixed(2)} for current quota window · ${data.plan || 'Plan'} 7-day equivalent $${(data.subscription_weekly_equivalent ?? 0).toFixed(2)}`
           })
         ]
       }))
@@ -364,14 +431,18 @@ function UsagePane({ ctx }) {
           jsx('div', { className: 'flex items-center justify-between gap-2', children: [
             jsxs('span', { className: 'truncate', children: [
               'Session',
-              jsx('span', { className: 'text-(--ui-text-quaternary)', children: ` · resets in ${data.session_reset || '?'}` })
+              data.reset_unavailable
+                ? jsx('span', { className: 'text-(--ui-text-quaternary)', children: ' · reset not exposed' })
+                : jsx('span', { className: 'text-(--ui-text-quaternary)', children: ` · ${data.reset_estimated ? 'est. reset in' : 'resets in'} ${data.session_reset || '?'}` })
             ]}),
             jsx('span', { className: pctColor(s), children: s != null ? `${s.toFixed(1)}% used` : 'n/a' })
           ]}),
           jsx('div', { className: 'flex items-center justify-between gap-2', children: [
             jsxs('span', { className: 'truncate', children: [
               'Weekly',
-              jsx('span', { className: 'text-(--ui-text-quaternary)', children: ` · resets in ${data.weekly_reset || '?'}` })
+              data.reset_unavailable
+                ? jsx('span', { className: 'text-(--ui-text-quaternary)', children: ' · reset not exposed' })
+                : jsx('span', { className: 'text-(--ui-text-quaternary)', children: ` · ${data.reset_estimated ? 'est. reset in' : 'resets in'} ${data.weekly_reset || '?'}` })
             ]}),
             jsx('span', { className: pctColor(w), children: w != null ? `${w.toFixed(1)}% used` : 'n/a' })
           ]})
@@ -390,7 +461,7 @@ function UsagePane({ ctx }) {
             children: [
               jsx('span', { className: 'truncate', children: m.model }),
               jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0 tabular-nums', children: [
-                `${m.requests} req · ${m.share_pct != null ? m.share_pct.toFixed(1) : ''}%`
+                `${m.requests} req · ${m.share_pct != null ? m.share_pct.toFixed(1) : '?'}% req share`
               ]})
             ]
           }, m.model)
@@ -409,7 +480,7 @@ function UsagePane({ ctx }) {
             children: [
               jsx('span', { className: 'truncate', children: m.model }),
               jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0 tabular-nums', children: [
-                `${m.requests} req · ${m.share_pct != null ? m.share_pct.toFixed(1) : ''}%`
+                `${m.requests} req · ${m.share_pct != null ? m.share_pct.toFixed(1) : '?'}% req share`
               ]})
             ]
           }, m.model)
@@ -417,64 +488,59 @@ function UsagePane({ ctx }) {
       }))
     }
 
-    // ── avg cost this week ──
-    if (settings.cost_week && data.weekly_models && data.weekly_models.length > 0 && data.est_weekly_budget != null) {
+    // ── effective subscription cost for current quota window ──
+    if (settings.cost_week && data.effective_subscription_cost_per_req != null) {
       rows.push(jsx(Collapsible, {
         title: SECTION_LABELS.cost_week,
         defaultOpen: false,
         children: [
-          data.weekly_models.map(m =>
-            jsxs('div', {
-              className: 'flex items-center justify-between gap-2 tabular-nums',
-              children: [
-                jsx('span', { className: 'truncate', children: m.model }),
-                jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0', children: [
-                  '$', (m.est_cost_per_req ?? 0).toFixed(4),
-                  ' · ', (m.est_cost_per_req_pct ?? 0).toFixed(3), '%'
-                ]})
-              ]
-            }, m.model)
-          ),
           jsxs('div', {
-            className: 'text-(--ui-text-quaternary) mt-1',
+            className: 'flex items-center justify-between gap-2 tabular-nums',
             children: [
-              'Budget: $', String(data.est_weekly_budget),
-              '/wk · consumed: $', String(data.est_cost_consumed),
-              ' · avg $', String(data.est_avg_cost_per_req ?? ''),
-              '/req'
+              jsx('span', { children: 'Across all requests' }),
+              jsx('span', {
+                className: 'text-(--ui-text-secondary) shrink-0',
+                children: `$${fmtUsd(data.effective_subscription_cost_per_req)}/req`
+              })
             ]
+          }),
+          jsxs('div', {
+            className: 'flex items-center justify-between gap-2 tabular-nums',
+            children: [
+              jsx('span', { children: `${data.plan || 'Plan'} 7-day equivalent` }),
+              jsx('span', {
+                className: 'text-(--ui-text-secondary) shrink-0',
+                children: `$${(data.subscription_weekly_equivalent ?? 0).toFixed(2)} ÷ ${data.total_weekly_requests ?? 0} req`
+              })
+            ]
+          }),
+          jsx('div', {
+            className: 'text-(--ui-text-quaternary) mt-1',
+            children: 'Effective allocation of the fixed subscription fee. Ollama does not expose per-model quota cost.'
           })
         ]
       }))
     }
 
-    // ── avg cost lifetime ──
-    if (settings.cost_lifetime && lifetime && lifetime.ok !== false && lifetime.models && lifetime.models.length > 0) {
+    // ── effective subscription cost across recorded windows ──
+    if (settings.cost_lifetime && lifetime && lifetime.ok !== false && (lifetime.weeks_count ?? 0) > 0) {
       rows.push(jsx(Collapsible, {
         title: SECTION_LABELS.cost_lifetime,
         defaultOpen: false,
         children: [
-          lifetime.models.map(m =>
-            jsxs('div', {
-              className: 'flex items-center justify-between gap-2 tabular-nums',
-              children: [
-                jsx('span', { className: 'truncate', children: m.model }),
-                jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0', children: [
-                  '$', (m.est_cost_per_req ?? 0).toFixed(4),
-                  ' · ', (m.est_cost_per_req_pct ?? 0).toFixed(3), '%'
-                ]})
-              ]
-            }, m.model)
-          ),
           jsxs('div', {
-            className: 'text-(--ui-text-quaternary) mt-1',
+            className: 'flex items-center justify-between gap-2 tabular-nums',
             children: [
-              String(lifetime.weeks_count ?? 0), ' weeks · ',
-              String(lifetime.total_requests ?? 0), ' requests · total $',
-              String((lifetime.est_total_cost ?? 0).toFixed(2)),
-              ' · avg $', String((lifetime.est_avg_cost_per_req ?? 0).toFixed(4)),
-              '/req'
+              jsx('span', { children: 'Across recorded requests' }),
+              jsx('span', {
+                className: 'text-(--ui-text-secondary) shrink-0',
+                children: `$${fmtUsd(lifetime.effective_subscription_cost_per_req ?? lifetime.est_avg_cost_per_req)}/req`
+              })
             ]
+          }),
+          jsx('div', {
+            className: 'text-(--ui-text-quaternary) mt-1',
+            children: `${lifetime.weeks_count ?? 0} windows · ${lifetime.total_requests ?? 0} requests · $${(lifetime.subscription_total_equivalent ?? lifetime.est_total_cost ?? 0).toFixed(2)} plan equivalent`
           })
         ]
       }))
@@ -502,7 +568,7 @@ function UsagePane({ ctx }) {
             ),
             jsx('div', {
               className: 'text-(--ui-text-quaternary) mt-1',
-              children: 'Higher cache = cheaper on raw APIs (cached input billed at 80-98% discount)'
+              children: 'Historical Hermes averages, not current-window Ollama telemetry. Missing cache prices use the normal input rate.'
             })
           ]
         }))
@@ -530,7 +596,7 @@ function UsagePane({ ctx }) {
             ),
             jsx('div', {
               className: 'text-(--ui-text-quaternary) mt-1',
-              children: 'Total tokens processed per model this week (avg tokens per request × requests)'
+              children: 'Estimated current quota-window volume: Ollama requests × historical average tokens/request'
             })
           ]
         }))
@@ -538,132 +604,119 @@ function UsagePane({ ctx }) {
     }
 
     // ── API equivalent cost ──
-    if (settings.api_cost && data.api_weekly_total != null && data.weekly_models && data.weekly_models.length > 0) {
-      const known = data.weekly_models.filter(m => m.api_cost_per_req != null)
+    if (settings.api_cost && data.weekly_models && data.weekly_models.some(m => m.api_cost_per_req != null)) {
+      const known = data.weekly_models.filter(m => m.api_cost_per_req != null && m.api_effective_per_1m != null)
       rows.push(jsx(Collapsible, {
         title: SECTION_LABELS.api_cost,
         defaultOpen: false,
         children: [
-          jsx('div', { className: 'text-(--ui-text-quaternary) mb-1', children: 'What the same usage would cost on official pay-per-token APIs' }),
+          jsx('div', {
+            className: 'text-(--ui-text-quaternary) mb-1',
+            children: 'Estimated pay-per-token cost. Effective $/1M is cache-aware and uses each model’s historical input/output mix.'
+          }),
           known.map(m =>
             jsxs('div', {
-              className: 'flex items-center justify-between gap-2 tabular-nums',
+              className: 'flex flex-col py-0.5 tabular-nums',
               children: [
-                jsx('span', { className: 'truncate', children: m.model }),
-                jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0', children: [
-                  '$', String(m.api_weekly_cost != null ? m.api_weekly_cost.toFixed(2) : '?'),
-                  '/wk · $', String(m.api_cost_per_req != null ? m.api_cost_per_req.toFixed(4) : '?'),
-                  '/req'
-                ]})
+                jsxs('div', {
+                  className: 'flex items-center justify-between gap-2',
+                  children: [
+                    jsx('span', { className: 'truncate', children: m.model }),
+                    jsx('span', {
+                      className: 'text-(--ui-text-secondary) shrink-0',
+                      children: `$${fmtUsd(m.api_cost_per_req)}/req · $${fmtPerMillion(m.api_effective_per_1m)}/1M effective`
+                    })
+                  ]
+                }),
+                jsx('div', {
+                  className: 'text-(--ui-text-quaternary) text-[0.6875rem]',
+                  children: `Input $${fmtPerMillion(m.api_input_per_1m)} · cache $${fmtPerMillion(m.api_cache_per_1m)}${m.api_cache_price_published ? '' : '*'} · output $${fmtPerMillion(m.api_output_per_1m)} /1M`
+                })
               ]
             }, m.model)
           ),
-          jsxs('div', {
-            className: 'flex items-center justify-between gap-2 border-t border-(--ui-stroke-secondary) pt-1 mt-1 font-medium',
-            children: [
-              jsx('span', { children: 'API total this week' }),
-              jsxs('span', { children: [
-                '$', String(data.api_weekly_total.toFixed(2)),
-                ' · Ollama $', String((data.est_cost_consumed ?? 0).toFixed(2))
-              ]})
-            ]
+          jsx('div', {
+            className: 'text-(--ui-text-quaternary) mt-1',
+            children: `Coverage: ${data.api_price_coverage_pct != null ? data.api_price_coverage_pct.toFixed(2) : '?'}% of requests · ${data.api_assumption || ''}`
           }),
-          jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: `Assumes ${data.api_assumption || ''}` }),
-          jsx('div', { className: 'text-(--ui-text-quaternary)', children: `Prices: ${data.price_source || 'builtin'} · Tokens: ${data.token_source || 'unknown'}` })
+          jsx('div', {
+            className: 'text-(--ui-text-quaternary)',
+            children: `Prices: ${data.price_source || 'builtin'} · Tokens: ${data.token_source || 'unknown'}`
+          }),
+          data.weekly_models.some(m => m.api_cache_price_published === false)
+            ? jsx('div', { className: 'text-(--ui-text-quaternary)', children: '* No cache discount published; normal input rate used.' })
+            : null,
+          data.api_unpriced_models?.length
+            ? jsx('div', { className: 'text-(--ui-badge-warning)', children: `Unpriced: ${data.api_unpriced_models.join(', ')}. Totals/comparisons are hidden until coverage is complete.` })
+            : null
         ]
       }))
     }
 
-    // ── cost efficiency ──
-    if (settings.cost_efficiency && data.api_weekly_total != null && data.weekly_models && data.weekly_models.length > 0) {
-      const known = data.weekly_models.filter(m => m.api_cost_pct != null)
+    // ── overall fixed plan vs API estimate ──
+    if (settings.cost_efficiency && data.api_window_total != null && data.api_total_pct != null) {
       rows.push(jsx(Collapsible, {
         title: SECTION_LABELS.cost_efficiency,
         defaultOpen: false,
         children: [
-          jsx('div', { className: 'text-(--ui-text-quaternary) mb-1', children: 'Ollama cost as % of API price — lower = better deal' }),
-          known.map(m =>
-            jsxs('div', {
-              className: 'flex items-center justify-between gap-2 tabular-nums',
-              children: [
-                jsx('span', { className: 'truncate', children: m.model }),
-                jsxs('span', { className: 'text-(--ui-text-secondary) shrink-0', children: [
-                  m.api_cost_pct != null ? `${m.api_cost_pct.toFixed(0)}% of API` : '?'
-                ]})
-              ]
-            }, m.model)
-          ),
           jsxs('div', {
-            className: 'flex items-center justify-between gap-2 border-t border-(--ui-stroke-secondary) pt-1 mt-1 font-medium',
+            className: 'flex items-center justify-between gap-2 tabular-nums',
             children: [
-              jsx('span', { children: 'Ollama overall' }),
-              jsx('span', { children: data.api_total_pct != null ? `${data.api_total_pct.toFixed(0)}% of API total` : '?' })
+              jsx('span', { children: `${data.plan || 'Plan'} 7-day equivalent` }),
+              jsx('span', {
+                className: 'text-(--ui-text-secondary)',
+                children: `${data.api_total_pct.toFixed(0)}% of API estimate`
+              })
             ]
+          }),
+          jsx('div', {
+            className: 'text-(--ui-text-quaternary) mt-1',
+            children: 'Overall comparison only. Per-model Ollama quota consumption is not exposed.'
           })
         ]
       }))
     }
 
     // ── break-even ──
-    if (settings.break_even && data.api_weekly_total != null && data.api_savings != null) {
-      const ratio = data.api_weekly_total > 0 ? (data.api_weekly_total / (data.est_cost_consumed || 1)) : 0
+    if (settings.break_even && data.api_window_total != null && data.break_even_usage_multiple != null) {
+      const multiple = data.break_even_usage_multiple
+      const apiRatio = data.api_vs_plan_ratio
+      const alreadyPast = multiple < 1
       rows.push(jsx(Collapsible, {
         title: SECTION_LABELS.break_even,
         defaultOpen: false,
         children: [
           jsxs('div', { className: 'flex items-center justify-between gap-2', children: [
-            jsx('span', { children: 'API cost / week' }),
-            jsxs('span', { className: 'text-(--ui-text-secondary) tabular-nums', children: [
-              '$', data.api_weekly_total.toFixed(2)
-            ]})
+            jsx('span', { children: 'API est. · current quota window' }),
+            jsx('span', {
+              className: 'text-(--ui-text-secondary) tabular-nums',
+              children: `$${data.api_window_total.toFixed(2)}`
+            })
           ]}),
           jsxs('div', { className: 'flex items-center justify-between gap-2', children: [
-            jsx('span', { children: 'Ollama cost / week' }),
-            jsxs('span', { className: 'text-(--ui-text-secondary) tabular-nums', children: [
-              '$', (data.est_cost_consumed ?? 0).toFixed(2)
-            ]})
+            jsx('span', { children: `${data.plan || 'Plan'} · 7-day equivalent` }),
+            jsx('span', {
+              className: 'text-(--ui-text-secondary) tabular-nums',
+              children: `$${(data.subscription_weekly_equivalent ?? 0).toFixed(2)}`
+            })
           ]}),
           jsxs('div', { className: 'flex items-center justify-between gap-2 mt-1', children: [
-            jsx('span', { className: 'text-(--ui-text-quaternary)', children: 'Break-even at' }),
-            jsxs('span', { className: 'text-(--ui-text-quaternary) tabular-nums', children: [
-              ratio > 0 ? `${ratio.toFixed(0)}× current usage` : '?'
-            ]})
+            jsx('span', { className: 'text-(--ui-text-quaternary)', children: alreadyPast ? 'Break-even was at' : 'Break-even at' }),
+            jsx('span', {
+              className: 'text-(--ui-text-quaternary) tabular-nums',
+              children: `${multiple.toFixed(2)}× current usage`
+            })
           ]}),
-          jsxs('div', { className: 'text-(--ui-text-quaternary) mt-1', children: [
-            'Ollama is ', ratio > 0 ? `${ratio.toFixed(0)}×` : '?', ' cheaper than pay-per-token this week'
-          ]})
+          jsx('div', {
+            className: 'text-(--ui-text-quaternary) mt-1',
+            children: apiRatio != null && apiRatio >= 1
+              ? `API estimate is ${apiRatio.toFixed(2)}× the plan equivalent at current usage.`
+              : 'API is currently cheaper; more usage is needed to reach subscription break-even.'
+          })
         ]
       }))
     }
 
-    // ── monthly projection ──
-    if (settings.monthly_proj && data.api_monthly_proj != null) {
-      const saved_m = (data.api_monthly_proj ?? 0) - (data.ollama_monthly ?? 20)
-      rows.push(jsx(Collapsible, {
-        title: SECTION_LABELS.monthly_proj,
-        defaultOpen: false,
-        children: [
-          jsxs('div', { className: 'flex items-center justify-between gap-2', children: [
-            jsx('span', { children: 'API projected / month' }),
-            jsxs('span', { className: 'text-(--ui-text-secondary) tabular-nums', children: [
-              '$', data.api_monthly_proj.toFixed(0)
-            ]})
-          ]}),
-          jsxs('div', { className: 'flex items-center justify-between gap-2', children: [
-            jsx('span', { children: 'Ollama Pro / month' }),
-            jsxs('span', { className: 'text-(--ui-text-secondary) tabular-nums', children: [
-              '$', String(data.ollama_monthly ?? 20)
-            ]})
-          ]}),
-          jsxs('div', { className: 'flex items-center justify-between gap-2 border-t border-(--ui-stroke-secondary) pt-1 mt-1 font-medium', children: [
-            jsx('span', { children: 'You save / month' }),
-            jsxs('span', { className: 'text-(--ui-text-primary)', children: [
-              '$', saved_m.toFixed(0)
-            ]})
-          ]})
-        ]
-      }))
-    }
   }
 
   // ── weekly history (outside the ok check — works even if fetch fails) ──
@@ -686,7 +739,8 @@ function UsagePane({ ctx }) {
               ]}),
               jsxs('span', { className: 'shrink-0 text-(--ui-text-secondary)', children: [
                 pct != null ? `${pct.toFixed(1)}%` : '?',
-                ' · $', String(w.est_cost_consumed != null ? w.est_cost_consumed.toFixed(2) : '?'),
+                ' · $', String((w.subscription_weekly_equivalent ?? w.est_cost_consumed) != null ? (w.subscription_weekly_equivalent ?? w.est_cost_consumed).toFixed(2) : '?'),
+                ' plan eq.',
                 w.top_model ? ` · ${w.top_model}` : ''
               ]})
             ]
@@ -698,7 +752,7 @@ function UsagePane({ ctx }) {
   }
 
   // ── reports (monthly + lifetime links) ──
-  if (settings.history && reports && reports.ok !== false) {
+  if (settings.reports && reports && reports.ok !== false) {
     const months = reports.months || []
     rows.push(jsx(Collapsible, {
       title: 'Reports',
@@ -762,20 +816,37 @@ function UsagePane({ ctx }) {
         type: 'button',
         onClick: () => {
           haptic('tap')
-          ctx.os.openExternal('http://localhost:8642')
+          host.navigate('/ollama-usage')
         },
-        children: 'Dashboard ↗'
+        children: dashboard ? 'Dashboard open' : 'Dashboard'
       })
     ]
   }))
 
-  return jsx('div', { className: 'flex h-full flex-col gap-2 p-3 text-sm overflow-y-auto', children: rows })
+  return jsx('div', {
+    className: dashboard
+      ? 'mx-auto flex h-full w-full max-w-4xl flex-col gap-2 overflow-y-auto p-6 text-sm'
+      : 'flex h-full flex-col gap-2 overflow-y-auto p-3 text-sm',
+    children: rows
+  })
 }
 
 export default {
   id: ID,
   name: 'Ollama Usage',
   register(ctx) {
+    ctx.register({
+      id: 'dashboard-page',
+      area: ROUTES_AREA,
+      data: { path: '/ollama-usage' },
+      render: () => jsx(UsagePane, { ctx, dashboard: true })
+    })
+    ctx.register({
+      id: 'dashboard-nav',
+      area: SIDEBAR_NAV_AREA,
+      order: 60,
+      data: { codicon: 'cloud', label: 'Ollama Usage', path: '/ollama-usage' }
+    })
     ctx.register({
       id: 'pane',
       area: 'panes',

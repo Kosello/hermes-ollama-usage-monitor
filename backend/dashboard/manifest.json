@@ -1,8 +1,8 @@
 {
   "name": "ollama-usage-monitor",
   "label": "Ollama Usage Monitor",
-  "description": "Ollama Cloud usage monitor — session + weekly quotas, plan tier, reset times, per-model request counts.",
+  "description": "Ollama Cloud usage monitor — official quota telemetry, plan economics, and API-equivalent estimates.",
   "icon": "Cloud",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "api": "plugin_api.py"
 }

@@ -1,5 +1,5 @@
 name: ollama-usage-monitor
-version: "1.1.0"
-description: "Ollama Cloud usage monitor backend — serves session/weekly quotas + per-model request counts to the desktop plugin (statusbar chip + pane)."
+version: "1.2.0"
+description: "Ollama Cloud usage monitor backend — official API usage, plan economics, and API-equivalent estimates for the desktop plugin."
 author: kosello
 kind: backend
