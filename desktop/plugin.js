@@ -728,7 +728,7 @@ function UsagePane({ ctx }) {
         type: 'button',
         onClick: () => {
           haptic('tap')
-          host.openExternal?.('http://localhost:8642')
+          ctx.os.openExternal('http://localhost:8642')
         },
         children: 'Dashboard ↗'
       })
