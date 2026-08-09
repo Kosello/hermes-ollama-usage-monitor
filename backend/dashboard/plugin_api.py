@@ -36,6 +36,9 @@ COOKIE_FILE = Path.home() / ".hermes" / "ollama_cookie.txt"
 KEYCHAIN_SERVICE = "hermes-ollama-cookie"
 KEYCHAIN_ACCOUNT = "ollama"
 SETTINGS_URL = "https://ollama.com/settings"
+API_USAGE_URL = "https://ollama.com/api/usage"
+API_KEY_FILE = Path.home() / ".hermes" / "ollama_api_key.txt"
+API_KEY_SOURCE = os.environ.get("OLLAMA_API_KEY_SOURCE", "file")
 TIMEOUT = 15
 CACHE_TTL_SECONDS = 60
 HISTORY_FILE = Path.home() / ".hermes" / "ollama-usage-history.jsonl"
@@ -160,6 +163,127 @@ def _fetch_settings_page(cookie: str) -> str:
     )
     with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
         return resp.read().decode("utf-8", errors="replace")
+
+
+# ── Official API (primary source; cookie scrape is the fallback) ────────────
+
+def _load_api_key() -> str | None:
+    """Read the official API key — env first, then the file."""
+    env_key = os.environ.get("OLLAMA_API_KEY")
+    if env_key:
+        return env_key
+    if API_KEY_SOURCE == "file" and API_KEY_FILE.exists():
+        key = API_KEY_FILE.read_text().strip()
+        if key and not key.startswith("__Secure-session"):
+            return key
+    return None
+
+
+def _fetch_usage_api(api_key: str) -> dict:
+    """GET https://ollama.com/api/usage — no cookie, no HTML parsing."""
+    req = urllib.request.Request(
+        API_USAGE_URL,
+        headers={"Authorization": api_key, "User-Agent": "hermes-ollama-usage-monitor/1.0"},
+    )
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _infer_plan() -> str | None:
+    """Infer the Ollama Cloud plan tier when the API doesn't expose it.
+
+    1. env OLLAMA_PLAN (explicit override)
+    2. scrape the settings page with the cookie (if available) — the only
+       authoritative source of the plan label
+    3. None (caller defaults to Pro budget)
+    """
+    env_plan = os.environ.get("OLLAMA_PLAN", "").strip().lower()
+    if env_plan in ("pro", "free", "max"):
+        return env_plan.capitalize()
+    try:
+        cookie = _load_cookie()
+        html = _fetch_settings_page(cookie)
+        m = re.search(r'Cloud usage</span>\s*\n?\s*<span[^>]*>\s*(pro|free|max)\s*<',
+                      html, re.IGNORECASE)
+        if m:
+            return m.group(1).capitalize()
+    except Exception:
+        pass
+    return None
+
+
+def _api_to_usage(api_data: dict) -> dict:
+    """Convert the official API response into the internal usage dict shape.
+
+    The API gives us session/weekly usage as 0–1 floats and per-model request
+    counts, but no share_pct, no plan tier, and no reset timestamps.  We
+    compute share_pct from request counts, derive reset timestamps from the
+    activity period, and then run the same cost-enrichment as the cookie path.
+    """
+    limits = api_data.get("limits", {})
+    session = limits.get("session", {})
+    weekly = limits.get("weekly", {})
+
+    def _models(block: dict) -> list:
+        models = [
+            {
+                "model": m.get("name", "?"),
+                "requests": m.get("request_count", 0),
+                "share_pct": None,
+            }
+            for m in block.get("models", [])
+        ]
+        total = sum(m["requests"] for m in models)
+        if total > 0:
+            for m in models:
+                m["share_pct"] = round(m["requests"] / total * 100, 1)
+        return models
+
+    session_models = _models(session)
+    weekly_models = _models(weekly)
+
+    # Derive reset timestamps from the activity period (last_4_weeks window).
+    # Session window is 5h — we don't know the exact start, so we approximate
+    # the reset as now + (1 - session_usage) × 5h.
+    period = api_data.get("activity", {}).get("period", {})
+    period_end = period.get("ending_at")
+    period_start = period.get("starting_at")
+    session_usage = session.get("usage", 0)
+    weekly_usage = weekly.get("usage", 0)
+
+    session_reset_iso = None
+    weekly_reset_iso = None
+    if period_end:
+        try:
+            end_dt = datetime.fromisoformat(period_end.replace("Z", "+00:00"))
+            # Weekly reset ≈ period_end + (1 - weekly_usage) × 7 days
+            remaining_week = max(1.0 - weekly_usage, 0.0)
+            weekly_dt = end_dt + timedelta(days=remaining_week * 7)
+            weekly_reset_iso = weekly_dt.isoformat()
+            # Session reset ≈ now + (1 - session_usage) × 5h
+            remaining_sess = max(1.0 - session_usage, 0.0)
+            session_dt = end_dt + timedelta(hours=remaining_sess * 5)
+            session_reset_iso = session_dt.isoformat()
+        except (ValueError, TypeError):
+            pass
+
+    data = {
+        "plan": _infer_plan(),  # API doesn't expose plan tier; infer from cookie/env
+        "session_used_pct": round(session_usage * 100, 1),
+        "weekly_used_pct": round(weekly_usage * 100, 1),
+        "session_reset": _relative_reset(session_reset_iso) if session_reset_iso else None,
+        "weekly_reset": _relative_reset(weekly_reset_iso) if weekly_reset_iso else None,
+        "session_reset_iso": session_reset_iso,
+        "weekly_reset_iso": weekly_reset_iso,
+        "session_models": session_models,
+        "weekly_models": weekly_models,
+        "models": session_models,  # backward-compat
+        "source": "api",
+    }
+
+    # Run the same cost enrichment as the cookie path.
+    _enrich_with_costs(data)
+    return data
 
 
 def _load_manual_price_overrides() -> dict:
@@ -403,14 +527,29 @@ def _parse_usage(html: str) -> dict:
     result["weekly_models"] = weekly_segs
     result["models"] = session_segs  # backward-compat: session segments
 
+    _enrich_with_costs(result)
+    return result
+
+
+def _enrich_with_costs(data: dict) -> None:
+    """Add cost estimates and API price comparisons to a usage dict (in place).
+
+    Called by both the cookie-scrape path (_parse_usage) and the official API
+    path (_api_to_usage) so they produce identical enriched output.
+
+    Reads data["plan"], data["weekly_used_pct"], data["weekly_models"] and
+    adds est_*, api_*, price_source, token_source fields to data.
+    """
+    weekly_segs = data.get("weekly_models") or []
+
     # ── Pi-mal-Daumen cost per request ────────────────────────────────────
     # Pro = $20/mo → ~$4.67/week.  Max = $100/mo → ~$23.33/week.
     # cost_consumed = weekly_budget × (weekly_used_pct / 100)
     # per_model_cost = cost_consumed × (share_pct / 100)
     # per_request = per_model_cost / requests
     weekly_budgets = {"pro": 20.0 / 4.33, "max": 100.0 / 4.33, "free": 0.0}
-    weekly_budget = weekly_budgets.get((result.get("plan") or "").lower(), 20.0 / 4.33)
-    weekly_used = result.get("weekly_used_pct") or 0.0
+    weekly_budget = weekly_budgets.get((data.get("plan") or "").lower(), 20.0 / 4.33)
+    weekly_used = data.get("weekly_used_pct") or 0.0
     cost_consumed = weekly_budget * (weekly_used / 100.0)
 
     for seg in weekly_segs:
@@ -423,10 +562,10 @@ def _parse_usage(html: str) -> dict:
             seg["est_cost_per_req"] = 0.0
             seg["est_cost_per_req_pct"] = 0.0
 
-    result["est_weekly_budget"] = round(weekly_budget, 2)
-    result["est_cost_consumed"] = round(cost_consumed, 2)
+    data["est_weekly_budget"] = round(weekly_budget, 2)
+    data["est_cost_consumed"] = round(cost_consumed, 2)
     total_reqs = sum(s["requests"] for s in weekly_segs)
-    result["est_avg_cost_per_req"] = round(cost_consumed / total_reqs, 4) if total_reqs else 0.0
+    data["est_avg_cost_per_req"] = round(cost_consumed / total_reqs, 4) if total_reqs else 0.0
 
     # ── Real API price comparison ─────────────────────────────────────────
     # Prices come from the fallback chain (manual override file → live
@@ -495,22 +634,20 @@ def _parse_usage(html: str) -> dict:
             seg["api_input_cost"] = None
             seg["api_cache_cost"] = None
             seg["api_output_cost"] = None
-    result["api_weekly_total"] = round(api_weekly_total, 4)
-    result["api_assumption"] = _api_assumption_text(token_avgs)
-    result["price_source"] = price_source
-    result["token_source"] = token_source
-    result["api_total_pct"] = (
+    data["api_weekly_total"] = round(api_weekly_total, 4)
+    data["api_assumption"] = _api_assumption_text(token_avgs)
+    data["price_source"] = price_source
+    data["token_source"] = token_source
+    data["api_total_pct"] = (
         round(cost_consumed / api_weekly_total * 100.0, 1) if api_weekly_total > 0 else None
     )
     # Savings + break-even + monthly projection
-    result["api_savings"] = round(api_weekly_total - cost_consumed, 2) if api_weekly_total > 0 else None
-    result["api_monthly_proj"] = round(api_weekly_total * 4.33, 2) if api_weekly_total > 0 else None
-    result["ollama_monthly"] = 20.0  # Pro plan
-    result["break_even_pct"] = (
+    data["api_savings"] = round(api_weekly_total - cost_consumed, 2) if api_weekly_total > 0 else None
+    data["api_monthly_proj"] = round(api_weekly_total * 4.33, 2) if api_weekly_total > 0 else None
+    data["ollama_monthly"] = 20.0  # Pro plan
+    data["break_even_pct"] = (
         round(cost_consumed / api_weekly_total * 100.0, 1) if api_weekly_total > 0 else None
     )
-
-    return result
 
 
 def _real_token_averages() -> dict:
@@ -992,6 +1129,24 @@ def _fetch_usage() -> dict:
         return data
 
     try:
+        # Primary: official API (no cookie, no HTML parsing).
+        api_key = _load_api_key()
+        if api_key:
+            try:
+                api_data = _fetch_usage_api(api_key)
+                data = _api_to_usage(api_data)
+                data["cached"] = False
+                data["fetched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                data["ok"] = True
+                _cache["ts"] = now
+                _cache["data"] = data
+                _record_history(data)
+                _record_session(data)
+                return data
+            except Exception as e:
+                logger.warning("Official API failed (%s), falling back to cookie scrape", e)
+
+        # Fallback: cookie scrape of the settings page.
         cookie = _load_cookie()
         html = _fetch_settings_page(cookie)
         data = _parse_usage(html)

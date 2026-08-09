@@ -4,3 +4,4 @@ __pycache__/
 ollama_cookie.txt
 ollama-usage-price-cache.json
 ollama-usage-prices.json
+ollama_api_key.txt
