@@ -1,5 +1,11 @@
 # Hermes Ollama Usage Monitor
 
+> **⚠️ WORK IN PROGRESS — expect bugs.** This plugin is under active development.
+> The core usage scraper and desktop chip/pane work, but you may hit rough edges
+> (stale cache, parser breakage when Ollama changes their HTML, price-chain
+> mismatches). If something breaks, [open an issue](https://github.com/Kosello/hermes-ollama-usage-monitor/issues)
+> or just re-paste a fresh cookie and restart Hermes.
+
 Live Ollama Cloud usage in Hermes Agent — session & weekly quotas, per-model request counts, weekly history, average cost per request, and threshold alerts, right in the desktop app. Plus a **standalone CLI** that works without Hermes.
 
 ![Ollama Cloud](https://img.shields.io/badge/ollama-cloud-000000?logo=ollama&logoColor=white)
