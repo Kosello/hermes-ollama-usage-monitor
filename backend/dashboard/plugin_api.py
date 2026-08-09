@@ -427,17 +427,49 @@ _BUILTIN_PRICES = {
 def _lookup_price(API_PRICES: dict, model: str) -> tuple | None:
     """Resolve a dashboard model name to a price tuple.
 
-    Tries exact match first, then OpenRouter-style suffix match
-    (e.g. 'glm-5.2' matches 'z-ai/glm-5.2', ':0731' variants stripped).
+    Matching order (first hit wins):
+    1. Exact key match
+    2. OpenRouter suffix match with ':' → '-' conversion
+       (e.g. 'deepseek-v4-flash:0731' → 'deepseek-v4-flash-0731'
+        matches 'deepseek/deepseek-v4-flash-0731')
+    3. Normalized suffix match (strip separators, ignore '-it' suffix)
+       (e.g. 'gemma4:31b' → 'gemma431b' matches 'google/gemma-4-31b-it')
+    4. Base name (strip ':variant') exact + suffix
+       (e.g. 'deepseek-v4-flash:0731' → 'deepseek-v4-flash'
+        matches 'deepseek/deepseek-v4-flash')
     """
     if model in API_PRICES:
         return API_PRICES[model]
+
+    # Ollama uses ':' for variants (e.g. 'model:0731'), OpenRouter uses '-'.
+    hyphen_model = model.replace(":", "-")
+
+    # 2. Try the full model name with ':' → '-' before stripping the variant.
+    for key, val in API_PRICES.items():
+        if key.endswith(f"/{hyphen_model}"):
+            return val
+
+    # 3. Normalized match: strip all separators, ignore common OpenRouter suffixes.
+    def _norm(s: str) -> str:
+        s = s.lower().replace("-", "").replace(":", "").replace(".", "")
+        s = s.replace("_", "")
+        # Strip OpenRouter trailing tags like ':free', '-it', '-instruct'
+        for tag in ("it", "instruct", "free", "latest"):
+            if s.endswith(tag):
+                s = s[: -len(tag)]
+        return s
+    norm_model = _norm(hyphen_model)
+    for key, val in API_PRICES.items():
+        key_base = key.rsplit("/", 1)[-1] if "/" in key else key
+        if _norm(key_base) == norm_model:
+            return val
+
+    # 4. Strip the variant and try base name.
     base = model.split(":")[0]
     if base in API_PRICES:
         return API_PRICES[base]
-    # Suffix match: any vendor key that ends with '/<base>' or '/<model>'.
     for key, val in API_PRICES.items():
-        if key.endswith(f"/{model}") or key.endswith(f"/{base}"):
+        if key.endswith(f"/{base}"):
             return val
     return None
 
