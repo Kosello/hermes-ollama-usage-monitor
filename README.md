@@ -76,9 +76,20 @@ Or via environment variable: `export OLLAMA_API_KEY=YOUR_API_KEY`
 
 **The API key doesn't expire with browser sessions** — it's a persistent credential tied to your account, so you set it once and forget it.
 
-### 4. Cookie (optional fallback — for plan tier detection)
+### 4. Plan tier (optional — defaults to Pro)
 
-The API doesn't expose your plan tier (Pro/Free/Max). The plugin tries to infer it from the cookie. If no cookie is available, it defaults to Pro budget ($20/mo). To set it up:
+The API doesn't expose your plan tier (Pro/Free/Max), which affects budget calculations. Three ways to set it:
+
+- **In the desktop pane** — click ⚙ → choose Free / Pro / Max. Persists to `~/.hermes/ollama-usage-plan.txt`.
+- **Config file:**
+  ```bash
+  echo 'pro' > ~/.hermes/ollama-usage-plan.txt
+  ```
+- **Environment variable:** `export OLLAMA_PLAN=pro`
+
+If none are set, the plugin tries to scrape the plan from the cookie. If that also fails, it defaults to Pro ($20/mo).
+
+### 5. Cookie (optional fallback)
 
 - **macOS Keychain** (recommended on macOS):
   ```bash
@@ -109,7 +120,7 @@ The API doesn't expose your plan tier (Pro/Free/Max). The plugin tries to infer 
 - `keychain` — Keychain only (errors if empty)
 - `file` — file only (no Keychain dependency)
 
-### 5. Restart
+### 6. Restart
 
 ```bash
 hermes gateway restart
@@ -124,7 +135,7 @@ Then in the desktop app: **⌘K → Reload desktop plugins**.
 > gateway process and the desktop renderer cache module state separately
 > and a hot reload doesn't always clear both.
 
-### 6. Optional: automatic cookie refresh (browser extension)
+### 7. Optional: automatic cookie refresh (browser extension)
 
 The plugin works fully with the manual cookie paste above — a fresh cookie is
 only needed roughly every 2 months when the session expires. If you want that
@@ -145,7 +156,7 @@ Then load the extension (see its README), enable it, and paste the token.
 **The extension is opt-in and disabled by default.** Without it, everything
 above still works — you just re-paste the cookie manually when it expires.
 
-### 7. Optional: alerts + daily line (cron)
+### 8. Optional: alerts + daily line (cron)
 
 ```bash
 # copy the helper scripts

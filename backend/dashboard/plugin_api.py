@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -189,17 +190,33 @@ def _fetch_usage_api(api_key: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _infer_plan() -> str | None:
-    """Infer the Ollama Cloud plan tier when the API doesn't expose it.
+PLAN_FILE = Path.home() / ".hermes" / "ollama-usage-plan.txt"
+VALID_PLANS = ("free", "pro", "max")
 
-    1. env OLLAMA_PLAN (explicit override)
-    2. scrape the settings page with the cookie (if available) — the only
-       authoritative source of the plan label
-    3. None (caller defaults to Pro budget)
+
+def _infer_plan() -> str | None:
+    """Resolve the Ollama Cloud plan tier.
+
+    1. config file ~/.hermes/ollama-usage-plan.txt (user's manual choice)
+    2. env OLLAMA_PLAN
+    3. cookie scrape of settings page (if cookie available)
+    4. None (caller defaults to Pro budget)
     """
+    # 1. Manual config file — highest priority, works without cookie/browser.
+    try:
+        if PLAN_FILE.exists():
+            val = PLAN_FILE.read_text().strip().lower()
+            if val in VALID_PLANS:
+                return val.capitalize()
+    except OSError:
+        pass
+
+    # 2. Environment variable.
     env_plan = os.environ.get("OLLAMA_PLAN", "").strip().lower()
-    if env_plan in ("pro", "free", "max"):
+    if env_plan in VALID_PLANS:
         return env_plan.capitalize()
+
+    # 3. Cookie scrape — only for the plan label.
     try:
         cookie = _load_cookie()
         html = _fetch_settings_page(cookie)
@@ -209,6 +226,7 @@ def _infer_plan() -> str | None:
             return m.group(1).capitalize()
     except Exception:
         pass
+
     return None
 
 
@@ -1233,3 +1251,34 @@ async def usage_report_open_month(path: str = ""):
         return {"ok": True, "path": path, "opened": True}
     except (OSError, FileNotFoundError):
         return {"ok": True, "path": path, "opened": False}
+
+
+class _PlanBody(BaseModel):
+    plan: str = ""
+
+
+@router.get("/usage/plan")
+async def usage_get_plan():
+    """Return the current plan tier and its source."""
+    plan = _infer_plan()
+    source = "default (Pro)" if plan is None else "config file"
+    return {"ok": True, "plan": plan or "Pro", "source": source}
+
+
+@router.post("/usage/plan")
+async def usage_set_plan(body: _PlanBody):
+    """Set the plan tier manually. Valid values: free, pro, max."""
+    plan_lower = body.plan.strip().lower()
+    if plan_lower not in VALID_PLANS:
+        return {"ok": False, "error": "invalid_plan",
+                "detail": f"Must be one of: {', '.join(VALID_PLANS)}"}
+    try:
+        PLAN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PLAN_FILE.write_text(plan_lower + "\n")
+        # Invalidate cache so next fetch uses the new plan
+        _cache["ts"] = 0
+        _cache["data"] = None
+        return {"ok": True, "plan": plan_lower.capitalize(),
+                "source": "config file"}
+    except OSError as e:
+        return {"ok": False, "error": "write_failed", "detail": str(e)}

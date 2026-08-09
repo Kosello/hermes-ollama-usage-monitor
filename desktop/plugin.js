@@ -197,6 +197,7 @@ function UsagePane({ ctx }) {
   // Load settings from storage (persists across reloads)
   const [settings, setSettings] = useState(null)
   const [showSettings, setShowSettings] = useState(false)
+  const [planOverride, setPlanOverride] = useState(null)
 
   // Load on mount — ctx.storage may not exist, use localStorage fallback
   useEffect(() => {
@@ -225,6 +226,10 @@ function UsagePane({ ctx }) {
     // Also load reports
     ctx.rest('/usage/report').then(r => {
       if (r?.ok) setReports(r)
+    }).catch(() => {})
+    // Load current plan
+    ctx.rest('/usage/plan').then(r => {
+      if (r?.ok) setPlanOverride(r.plan)
     }).catch(() => {})
     return () => { done = true }
   }, [])
@@ -255,6 +260,35 @@ function UsagePane({ ctx }) {
     rows.push(jsxs('div', {
       className: 'mt-2 border border-(--ui-stroke-secondary) rounded p-2 flex flex-col gap-0.5',
       children: [
+        // Plan selector
+        jsxs('div', {
+          className: 'flex items-center justify-between gap-2 py-1',
+          children: [
+            jsx('span', { className: 'text-xs text-(--ui-text-secondary)', children: 'Plan' }),
+            jsxs('div', { className: 'flex gap-0.5', children: [
+              ...['Free', 'Pro', 'Max'].map(p =>
+                jsx('button', {
+                  type: 'button',
+                  className: cn(
+                    'rounded px-2 py-0.5 text-xs transition-colors',
+                    (planOverride || 'Pro') === p
+                      ? 'bg-(--ui-accent) text-white'
+                      : 'bg-(--ui-stroke-secondary) text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)'
+                  ),
+                  onClick: () => {
+                    haptic('tap')
+                    setPlanOverride(p)
+                    ctx.rest('/usage/plan', { method: 'POST', body: { plan: p.toLowerCase() } })
+                      .then(r => { if (r?.ok) { setPlanOverride(r.plan); refresh() } })
+                      .catch(() => {})
+                  },
+                  children: p
+                }, p)
+              )
+            ]})
+          ]
+        }),
+        jsx('div', { className: 'h-px bg-(--ui-stroke-secondary) my-1' }),
         jsx('div', { className: 'font-medium text-xs mb-1', children: 'Sections' }),
         ...SECTION_KEYS.map(k =>
           jsx(Toggle, {
