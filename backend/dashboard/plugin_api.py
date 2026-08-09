@@ -645,6 +645,9 @@ def _enrich_with_costs(data: dict) -> None:
         prices = _lookup_price(API_PRICES, seg["model"])
         if prices:
             p_in, p_out, p_cache = prices
+            # Some OpenRouter models don't report cache_read pricing — treat as 0.
+            if p_cache is None:
+                p_cache = 0.0
             avg = token_avgs.get(seg["model"]) or fallback_avg
             if avg:
                 in_t, out_t, cache_t = avg
