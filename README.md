@@ -89,7 +89,28 @@ The plugin reads your Ollama Cloud session cookie from **either**:
 hermes gateway restart
 ```
 
-### 5. Optional: alerts + daily line (cron)
+### 5. Optional: automatic cookie refresh (browser extension)
+
+The plugin works fully with the manual cookie paste above — a fresh cookie is
+only needed roughly every 2 months when the session expires. If you want that
+last manual step automated too, there is an **optional** companion:
+
+- **[ollama-cookie-sync-extension](https://github.com/Kosello/ollama-cookie-sync-extension)** —
+  a Chromium extension (Brave/Chrome/Arc) that watches the HttpOnly
+  `__Secure-session` cookie and pushes it to a local sync listener
+  ([`cookie-sync-listener.py`](cookie-sync-listener.py), included in this repo),
+  which updates `~/.hermes/ollama_cookie.txt` automatically.
+
+```bash
+# one-time: start the listener (prints a pairing token)
+python3 cookie-sync-listener.py
+```
+
+Then load the extension (see its README), enable it, and paste the token.
+**The extension is opt-in and disabled by default.** Without it, everything
+above still works — you just re-paste the cookie manually when it expires.
+
+### 6. Optional: alerts + daily line (cron)
 
 ```bash
 # copy the helper scripts
@@ -200,10 +221,14 @@ standalone/
 scripts/
   ollama_usage_watch.py       # threshold watchdog (Hermes cron, silent unless crossed)
   ollama_usage_daily.py       # daily one-line usage summary (Hermes cron)
+cookie-sync-listener.py       # OPTIONAL: local listener for the cookie-sync extension
 tests/
   test_parser.py              # parser smoke test
   fixtures/settings_page.html # saved page snapshot for CI
 ```
+
+Optional companion (separate repo):
+- **[ollama-cookie-sync-extension](https://github.com/Kosello/ollama-cookie-sync-extension)** — browser extension that auto-refreshes the cookie via `cookie-sync-listener.py`
 
 ## License
 
