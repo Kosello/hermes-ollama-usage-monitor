@@ -708,14 +708,31 @@ function UsagePane({ ctx }) {
     }))
   }
 
-  rows.push(jsx('button', {
-    className: cn(
-      'mt-3 self-start rounded-md border px-2 py-1 text-xs',
-      'border-(--ui-stroke-secondary) text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)'
-    ),
-    type: 'button',
-    onClick: refresh,
-    children: 'Refresh'
+  rows.push(jsxs('div', {
+    className: 'mt-3 flex items-center gap-2',
+    children: [
+      jsx('button', {
+        className: cn(
+          'rounded-md border px-2 py-1 text-xs',
+          'border-(--ui-stroke-secondary) text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)'
+        ),
+        type: 'button',
+        onClick: refresh,
+        children: 'Refresh'
+      }),
+      jsx('button', {
+        className: cn(
+          'rounded-md border px-2 py-1 text-xs',
+          'border-(--ui-stroke-secondary) text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)'
+        ),
+        type: 'button',
+        onClick: () => {
+          haptic('tap')
+          ctx.os.openExternal('http://localhost:8642')
+        },
+        children: 'Dashboard ↗'
+      })
+    ]
   }))
 
   return jsx('div', { className: 'flex h-full flex-col gap-2 p-3 text-sm overflow-y-auto', children: rows })
