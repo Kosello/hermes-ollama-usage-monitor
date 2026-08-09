@@ -13,6 +13,8 @@ Live Ollama Cloud usage in Hermes Agent — session & weekly quotas, per-model r
 
 ![Dashboard screenshot](docs/screenshot-dashboard.png)
 
+![Plugin pane screenshot](docs/screenshot-plugin.png)
+
 ## Quick install
 
 ```bash
