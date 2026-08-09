@@ -64,7 +64,19 @@ The plugin reads your Ollama Cloud session cookie from **either**:
   chmod 600 ~/.hermes/ollama_cookie.txt
   ```
 
-Get the value from your browser: open [ollama.com/settings](https://ollama.com/settings) (logged in) → DevTools → Application/Storage → Cookies → `https://ollama.com` → copy `__Secure-session`.
+**How to get the cookie value:**
+
+1. Log in to [ollama.com](https://ollama.com) in your browser
+2. Open DevTools:
+   - **Chrome/Edge/Firefox:** `F12` or `⌘+Option+I` → **Application** tab → **Storage** → **Cookies** → `https://ollama.com`
+   - **Safari:** `⌘+Option+I` → **Storage** tab → **Cookies** → `https://ollama.com`
+3. Find the cookie named `__Secure-session`
+4. Double-click the **Value** cell, select all (`⌘+A`), copy (`⌘+C`)
+   - ✅ Make sure the **"Show URL-decoded"** checkbox is **checked** — the raw value is a base64 string starting with `YWdl…`
+   - The cookie is **HttpOnly** (can't be read via JavaScript), so DevTools is the only way
+5. Paste it into the file or Keychain command above (without the `__Secure-session=` prefix — the plugin adds that automatically)
+
+**Note:** The cookie expires periodically. If the plugin shows "Unavailable", repeat steps 3–5 with the fresh value.
 
 **Storage selection** via env var `OLLAMA_COOKIE_SOURCE`:
 - `auto` (default) — Keychain if a cookie is stored there, otherwise the file
