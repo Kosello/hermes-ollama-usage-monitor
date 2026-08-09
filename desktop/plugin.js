@@ -534,7 +534,8 @@ function UsagePane({ ctx }) {
               ]})
             ]
           }),
-          jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: `Assumes ${data.api_assumption || ''}` })
+          jsx('div', { className: 'text-(--ui-text-quaternary) mt-1', children: `Assumes ${data.api_assumption || ''}` }),
+          jsx('div', { className: 'text-(--ui-text-quaternary)', children: `Prices: ${data.price_source || 'builtin'} · Tokens: ${data.token_source || 'unknown'}` })
         ]
       }))
     }

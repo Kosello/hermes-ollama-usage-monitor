@@ -105,7 +105,7 @@ The watchdog is **silent** until a threshold is crossed (no token cost, no spam)
 
 ## Cost estimate methodology
 
-Ollama Cloud bills by GPU-time utilization, not tokens. The per-request cost is a rough proxy:
+Ollama Cloud bills by GPU-time utilization, not tokens. The per-request cost is a rough proxy ("π✕ Daumen"):
 
 ```
 weekly_budget   = plan_price / 4.33          # Pro $20/mo ≈ $4.62/wk
@@ -116,6 +116,21 @@ cost_per_req_%  = cost_per_req / weekly_budget × 100
 ```
 
 The model share% comes straight from Ollama's own usage bar segments, which already reflect the GPU-time weighting — so heavier models (glm-5.2 = High) show higher per-request cost than lighter ones (deepseek-v4-flash = Medium).
+
+### "What would this cost on the native APIs?" — fallback chain
+
+The API-equivalent cost uses real token counts × official API list prices, resolved through a fallback chain — the first source that has data wins, manual is the last resort when everything else fails:
+
+| Level | Prices (per 1M tokens) | Tokens per request |
+|---|---|---|
+| 1 | **Manual override file** `~/.hermes/ollama-usage-prices.json` | **Manual override** (same file, `tokens_per_request` key) |
+| 2 | **Live OpenRouter fetch** (vendor list prices, cached 24h) | **Hermes state.db** (real per-model averages) |
+| 3 | Builtin defaults (bundled table) | Cross-model mean of known models |
+| 4 | — | 1000 in + 500 out assumption |
+
+The pane shows which source was used: `Prices: OpenRouter (live) · Tokens: Hermes state.db`. To pin prices yourself, copy `ollama-usage-prices.example.json` → `~/.hermes/ollama-usage-prices.json` and edit; delete the file to revert to automatic.
+
+Cache-hit input tokens are billed at the discounted cache rate (OpenRouter reports these per model).
 
 ## Caveats
 

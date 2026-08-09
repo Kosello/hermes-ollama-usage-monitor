@@ -1,0 +1,13 @@
+{
+  "_comment": "Manual override file for ollama-usage-monitor. Delete this file to revert to the automatic chain (live OpenRouter fetch -> builtin defaults). Prices are USD per 1M tokens. tokens_per_request = [avg input, avg output, avg cache_read] per request.",
+  "models": {
+    "glm-5.2": { "input": 1.40, "output": 4.40, "cache_read": 0.26 },
+    "deepseek-v4-flash:0731": { "input": 0.14, "output": 0.28, "cache_read": 0.0028 },
+    "deepseek-v4-pro": { "input": 1.74, "output": 3.48, "cache_read": 0.0036 },
+    "minimax-m3": { "input": 0.24, "output": 0.96, "cache_read": 0.06 }
+  },
+  "tokens_per_request": {
+    "glm-5.2": [100000, 3000, 20000],
+    "deepseek-v4-flash:0731": [190000, 700, 0]
+  }
+}

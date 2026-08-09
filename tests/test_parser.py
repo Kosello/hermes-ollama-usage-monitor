@@ -34,8 +34,10 @@ spec.loader.exec_module(mod)
 def main() -> int:
     html = FIXTURE.read_text()
     # Deterministic: stub out state.db so the 1000/500 fallback is exercised
-    # regardless of the machine running the test (CI has no state.db).
+    # regardless of the machine running the test (CI has no state.db), and
+    # stub the price chain so no network call happens (CI has no network).
     mod._real_token_averages = lambda: {}
+    mod._resolve_api_prices = lambda: (mod._BUILTIN_PRICES, "builtin defaults")
     data = mod._parse_usage(html)
 
     assert data["plan"] == "Pro", f"plan: {data['plan']}"

@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .DS_Store
 ollama_cookie.txt
+ollama-usage-price-cache.json
+ollama-usage-prices.json
