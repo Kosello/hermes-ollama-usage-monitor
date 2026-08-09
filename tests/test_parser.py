@@ -26,6 +26,12 @@ _RouterStub = type("APIRouter", (), {
 _fastapi.APIRouter = _RouterStub
 sys.modules["fastapi"] = _fastapi
 
+# plugin_api also imports pydantic.BaseModel for request bodies — stub it so
+# parser-only smoke test can run in CI without installing pydantic.
+_pydantic = types.ModuleType("pydantic")
+_pydantic.BaseModel = type("BaseModel", (), {})
+sys.modules["pydantic"] = _pydantic
+
 spec = importlib.util.spec_from_file_location("plugin_api", BACKEND)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
