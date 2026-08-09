@@ -89,6 +89,15 @@ The plugin reads your Ollama Cloud session cookie from **either**:
 hermes gateway restart
 ```
 
+Then in the desktop app: **⌘K → Reload desktop plugins**.
+
+> **If the chip/pane don't appear after a gateway restart + reload**, fully
+> **quit and relaunch the Hermes app** (⌘Q, not just close the window).
+> Some plugin changes — especially to the desktop plugin JS or the backend
+> router — only take effect after a complete app restart, because the
+> gateway process and the desktop renderer cache module state separately
+> and a hot reload doesn't always clear both.
+
 ### 5. Optional: automatic cookie refresh (browser extension)
 
 The plugin works fully with the manual cookie paste above — a fresh cookie is
