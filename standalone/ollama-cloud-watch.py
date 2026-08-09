@@ -63,6 +63,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SETTINGS_URL = "https://ollama.com/settings"
+API_USAGE_URL = "https://ollama.com/api/usage"
+API_KEY_FILE = Path.home() / ".hermes" / "ollama_api_key.txt"
+PLAN_FILE = Path.home() / ".hermes" / "ollama-usage-plan.txt"
+VALID_PLANS = ("free", "pro", "max")
 TIMEOUT = 15
 DEFAULT_INTERVAL = 1800  # 30 minutes
 WARN_PCT = 75.0
@@ -220,13 +224,24 @@ def _parse_usage(html: str) -> dict:
         else:
             result["session_models"].append(seg)
 
-    # Cost estimates
+    _enrich_with_costs(result)
+    return result
+
+
+def _enrich_with_costs(data: dict) -> None:
+    """Add cost estimates to a usage dict (in place).
+
+    Shared by the cookie-scrape path (_parse_usage) and the API path
+    (_api_to_usage).
+    """
+    weekly_segs = data.get("weekly_models") or []
+
     weekly_budgets = {"pro": 20.0 / 4.33, "max": 100.0 / 4.33, "free": 0.0}
-    weekly_budget = weekly_budgets.get((result.get("plan") or "").lower(), 20.0 / 4.33)
-    weekly_used = result.get("weekly_used_pct") or 0.0
+    weekly_budget = weekly_budgets.get((data.get("plan") or "").lower(), 20.0 / 4.33)
+    weekly_used = data.get("weekly_used_pct") or 0.0
     cost_consumed = weekly_budget * (weekly_used / 100.0)
 
-    for seg in result["weekly_models"]:
+    for seg in weekly_segs:
         share = seg.get("share_pct") or 0.0
         seg["est_cost"] = round(cost_consumed * (share / 100.0), 4)
         if seg["requests"] > 0:
@@ -236,15 +251,145 @@ def _parse_usage(html: str) -> dict:
             seg["est_cost_per_req"] = 0.0
             seg["est_cost_per_req_pct"] = 0.0
 
-    result["est_weekly_budget"] = round(weekly_budget, 2)
-    result["est_cost_consumed"] = round(cost_consumed, 2)
-    total_reqs = sum(s["requests"] for s in result["weekly_models"])
-    result["est_avg_cost_per_req"] = round(cost_consumed / total_reqs, 4) if total_reqs else 0.0
+    data["est_weekly_budget"] = round(weekly_budget, 2)
+    data["est_cost_consumed"] = round(cost_consumed, 2)
+    total_reqs = sum(s["requests"] for s in weekly_segs)
+    data["est_avg_cost_per_req"] = round(cost_consumed / total_reqs, 4) if total_reqs else 0.0
 
-    return result
+
+# ── official API (primary source) ──────────────────────────────────────────
+
+def _load_api_key() -> str | None:
+    """Read the official API key — env first, then the file."""
+    env_key = os.environ.get("OLLAMA_API_KEY")
+    if env_key:
+        return env_key
+    try:
+        if API_KEY_FILE.exists():
+            key = API_KEY_FILE.read_text().strip()
+            if key and not key.startswith("__Secure-session"):
+                return key
+    except OSError:
+        pass
+    return None
+
+
+def _fetch_usage_api(api_key: str) -> dict:
+    """GET https://ollama.com/api/usage — no cookie, no HTML parsing."""
+    req = urllib.request.Request(
+        API_USAGE_URL,
+        headers={"Authorization": api_key, "User-Agent": "ollama-cloud-watch/1.1"},
+    )
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _infer_plan(cookie_path: Path) -> str | None:
+    """Resolve the plan tier: config file → env → cookie scrape → None."""
+    try:
+        if PLAN_FILE.exists():
+            val = PLAN_FILE.read_text().strip().lower()
+            if val in VALID_PLANS:
+                return val.capitalize()
+    except OSError:
+        pass
+    env_plan = os.environ.get("OLLAMA_PLAN", "").strip().lower()
+    if env_plan in VALID_PLANS:
+        return env_plan.capitalize()
+    try:
+        cookie = _load_cookie(cookie_path)
+        html = _fetch_settings(cookie)
+        m = re.search(r'Cloud usage</span>\s*\n?\s*<span[^>]*>\s*(pro|free|max)\s*<',
+                      html, re.IGNORECASE)
+        if m:
+            return m.group(1).capitalize()
+    except Exception:
+        pass
+    return None
+
+
+def _api_to_usage(api_data: dict, cookie_path: Path) -> dict:
+    """Convert the official API response into the internal usage dict shape."""
+    limits = api_data.get("limits", {})
+    session = limits.get("session", {})
+    weekly = limits.get("weekly", {})
+
+    def _models(block: dict) -> list:
+        models = [
+            {"model": m.get("name", "?"), "requests": m.get("request_count", 0),
+             "share_pct": None}
+            for m in block.get("models", [])
+        ]
+        total = sum(m["requests"] for m in models)
+        if total > 0:
+            for m in models:
+                m["share_pct"] = round(m["requests"] / total * 100, 1)
+        return models
+
+    session_models = _models(session)
+    weekly_models = _models(weekly)
+    session_usage = session.get("usage", 0)
+    weekly_usage = weekly.get("usage", 0)
+
+    # Derive reset timestamps from the activity period.
+    period = api_data.get("activity", {}).get("period", {})
+    period_end = period.get("ending_at")
+    session_reset_iso = None
+    weekly_reset_iso = None
+    if period_end:
+        try:
+            # Truncate nanoseconds to microseconds (Python max 6 decimal places)
+            clean = period_end.replace("Z", "+00:00")
+            if "." in clean:
+                head, frac = clean.split(".", 1)
+                # Keep 6 digits + whatever timezone suffix follows
+                if "+" in frac:
+                    digits, tz = frac.split("+", 1)
+                    frac = digits[:6] + "+" + tz
+                else:
+                    frac = frac[:6]
+                clean = head + "." + frac
+            end_dt = datetime.fromisoformat(clean)
+            remaining_week = max(1.0 - weekly_usage, 0.0)
+            weekly_dt = end_dt + timedelta(days=remaining_week * 7)
+            weekly_reset_iso = weekly_dt.isoformat()
+            remaining_sess = max(1.0 - session_usage, 0.0)
+            session_dt = end_dt + timedelta(hours=remaining_sess * 5)
+            session_reset_iso = session_dt.isoformat()
+        except (ValueError, TypeError):
+            pass
+
+    data = {
+        "plan": _infer_plan(cookie_path),
+        "session_used_pct": round(session_usage * 100, 1),
+        "weekly_used_pct": round(weekly_usage * 100, 1),
+        "session_reset": _relative_reset(session_reset_iso) if session_reset_iso else None,
+        "weekly_reset": _relative_reset(weekly_reset_iso) if weekly_reset_iso else None,
+        "session_reset_iso": session_reset_iso,
+        "weekly_reset_iso": weekly_reset_iso,
+        "session_models": session_models,
+        "weekly_models": weekly_models,
+        "source": "api",
+    }
+    _enrich_with_costs(data)
+    return data
 
 
 def _fetch_usage(cookie_path: Path) -> dict:
+    """Fetch usage — API key first, cookie scrape as fallback."""
+    # Primary: official API
+    api_key = _load_api_key()
+    if api_key:
+        try:
+            api_data = _fetch_usage_api(api_key)
+            data = _api_to_usage(api_data, cookie_path)
+            data["ok"] = True
+            data["fetched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            return data
+        except Exception as e:
+            print(f"⚠️  API fetch failed ({e}), falling back to cookie", file=sys.stderr)
+
+    # Fallback: cookie scrape
     cookie = _load_cookie(cookie_path)
     html = _fetch_settings(cookie)
     data = _parse_usage(html)
@@ -497,8 +642,8 @@ def print_usage(data: dict, as_json: bool = False) -> None:
     s = data.get("session_used_pct")
     w = data.get("weekly_used_pct")
     print(f"📊 Ollama Cloud — {plan} plan")
-    print(f"   Session:  {s:.1f}% used · resets in {data.get('session_reset', '?')}" if s is not None else "   Session:  n/a")
-    print(f"   Weekly:   {w:.1f}% used · resets in {data.get('weekly_reset', '?')}" if w is not None else "   Weekly:   n/a")
+    print(f"   Session:  {s:.1f}% used · resets in {data.get('session_reset') or '?'}" if s is not None else "   Session:  n/a")
+    print(f"   Weekly:   {w:.1f}% used · resets in {data.get('weekly_reset') or '?'}" if w is not None else "   Weekly:   n/a")
     print(f"   Est. cost consumed: ${data.get('est_cost_consumed', 0):.2f} / ${data.get('est_weekly_budget', 0):.2f}/wk")
     print()
 

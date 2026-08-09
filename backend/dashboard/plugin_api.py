@@ -273,7 +273,17 @@ def _api_to_usage(api_data: dict) -> dict:
     weekly_reset_iso = None
     if period_end:
         try:
-            end_dt = datetime.fromisoformat(period_end.replace("Z", "+00:00"))
+            # Truncate nanoseconds to microseconds (Python max 6 decimal places)
+            clean = period_end.replace("Z", "+00:00")
+            if "." in clean:
+                head, frac = clean.split(".", 1)
+                if "+" in frac:
+                    digits, tz = frac.split("+", 1)
+                    frac = digits[:6] + "+" + tz
+                else:
+                    frac = frac[:6]
+                clean = head + "." + frac
+            end_dt = datetime.fromisoformat(clean)
             # Weekly reset ≈ period_end + (1 - weekly_usage) × 7 days
             remaining_week = max(1.0 - weekly_usage, 0.0)
             weekly_dt = end_dt + timedelta(days=remaining_week * 7)
