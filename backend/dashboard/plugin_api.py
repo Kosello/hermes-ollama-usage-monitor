@@ -264,22 +264,17 @@ def _api_to_usage(api_data: dict) -> dict:
     session_models = _models(session)
     weekly_models = _models(weekly)
 
-    # The usage endpoint does not expose limit-window reset timestamps. The
-    # activity period is only the telemetry query period; usage percentage has
-    # no mathematical relationship to elapsed time, so resets stay unknown.
     session_usage = session.get("usage", 0)
     weekly_usage = weekly.get("usage", 0)
-    session_reset_iso = None
-    weekly_reset_iso = None
 
     data = {
         "plan": _infer_plan(),  # API doesn't expose plan tier; infer from cookie/env
         "session_used_pct": round(session_usage * 100, 1),
         "weekly_used_pct": round(weekly_usage * 100, 1),
-        "session_reset": _relative_reset(session_reset_iso) if session_reset_iso else None,
-        "weekly_reset": _relative_reset(weekly_reset_iso) if weekly_reset_iso else None,
-        "session_reset_iso": session_reset_iso,
-        "weekly_reset_iso": weekly_reset_iso,
+        "session_reset": None,
+        "weekly_reset": None,
+        "session_reset_iso": None,
+        "weekly_reset_iso": None,
         "session_models": session_models,
         "weekly_models": weekly_models,
         "models": session_models,  # backward-compat
@@ -535,7 +530,8 @@ def _parse_usage(html: str) -> dict:
         "weekly_used_pct": None,
         "weekly_reset": None,
         "models": [],
-        "share_basis": "requests",
+        "source": "cookie",
+        "share_basis": "ollama_usage_bar",
         "reset_estimated": False,
     }
 
@@ -670,15 +666,50 @@ def _enrich_with_costs(data: dict) -> None:
     unpriced_models = []
     token_bases = set()
     manual_token_models = set(overrides.get("tokens", {}))
+
+    def _token_profile(model: str):
+        avg = token_avgs.get(model)
+        if avg and model in manual_token_models:
+            basis = "manual model override"
+        elif avg:
+            basis = "model history"
+        elif fallback_avg:
+            avg = fallback_avg
+            basis = fallback_basis
+        else:
+            avg = (1000.0, 500.0, 0.0)
+            basis = "fixed fallback"
+        return (
+            max(float(avg[0] or 0), 0.0),
+            max(float(avg[1] or 0), 0.0),
+            max(float(avg[2] or 0), 0.0),
+            basis,
+        )
+
     for seg in weekly_segs:
         reqs = max(int(seg.get("requests") or 0), 0)
+        in_t, out_t, cache_t, token_basis = _token_profile(seg["model"])
+        prompt_t = in_t + cache_t
+        token_bases.add(token_basis)
+        seg["token_estimate_basis"] = token_basis
+        seg["avg_uncached_input_tokens"] = round(in_t)
+        seg["avg_cache_tokens"] = round(cache_t)
+        seg["avg_prompt_tokens"] = round(prompt_t)
+        seg["avg_in_tokens"] = round(prompt_t)
+        seg["avg_out_tokens"] = round(out_t)
+        seg["cache_hit_pct"] = round(cache_t / prompt_t * 100.0, 1) if prompt_t > 0 else None
+        seg["total_uncached_input_tokens"] = round(in_t * reqs)
+        seg["total_cache_read_tokens"] = round(cache_t * reqs)
+        seg["total_prompt_tokens"] = round(prompt_t * reqs)
+        seg["total_in_tokens"] = round(prompt_t * reqs)
+        seg["total_out_tokens"] = round(out_t * reqs)
+
         prices = _lookup_price(api_prices, seg["model"])
         if not prices:
             unpriced_models.append(seg["model"])
             for field in (
                 "api_cost_per_req", "api_effective_per_1m", "api_weekly_cost",
-                "api_cost_pct", "cache_hit_pct", "total_in_tokens",
-                "total_out_tokens", "api_input_cost", "api_cache_cost",
+                "api_cost_pct", "api_input_cost", "api_cache_cost",
                 "api_output_cost", "api_input_per_1m", "api_output_per_1m",
                 "api_cache_per_1m",
             ):
@@ -691,23 +722,6 @@ def _enrich_with_costs(data: dict) -> None:
         # Missing cache pricing means no published discount, not free input.
         p_cache = p_in if p_cache_published is None else float(p_cache_published)
 
-        avg = token_avgs.get(seg["model"])
-        if avg and seg["model"] in manual_token_models:
-            token_basis = "manual model override"
-        elif avg:
-            token_basis = "model history"
-        elif fallback_avg:
-            avg = fallback_avg
-            token_basis = fallback_basis
-        else:
-            avg = (1000.0, 500.0, 0.0)
-            token_basis = "fixed fallback"
-        token_bases.add(token_basis)
-
-        in_t = max(float(avg[0] or 0), 0.0)  # canonical uncached input
-        out_t = max(float(avg[1] or 0), 0.0)
-        cache_t = max(float(avg[2] or 0), 0.0)  # canonical cache-read input
-        prompt_t = in_t + cache_t
         per_req = (
             (in_t / 1e6) * p_in
             + (cache_t / 1e6) * p_cache
@@ -729,18 +743,6 @@ def _enrich_with_costs(data: dict) -> None:
         seg["api_output_per_1m"] = round(p_out, 6)
         seg["api_cache_per_1m"] = round(p_cache, 6)
         seg["api_cache_price_published"] = p_cache_published is not None
-        seg["token_estimate_basis"] = token_basis
-        seg["avg_uncached_input_tokens"] = round(in_t)
-        seg["avg_cache_tokens"] = round(cache_t)
-        seg["avg_prompt_tokens"] = round(prompt_t)
-        seg["avg_in_tokens"] = round(prompt_t)  # compatibility: total prompt input
-        seg["avg_out_tokens"] = round(out_t)
-        seg["cache_hit_pct"] = round(cache_t / prompt_t * 100.0, 1) if prompt_t > 0 else None
-        seg["total_uncached_input_tokens"] = round(in_t * reqs)
-        seg["total_cache_read_tokens"] = round(cache_t * reqs)
-        seg["total_prompt_tokens"] = round(prompt_t * reqs)
-        seg["total_in_tokens"] = round(prompt_t * reqs)  # compatibility
-        seg["total_out_tokens"] = round(out_t * reqs)
         seg["api_input_cost"] = round((in_t / 1e6) * p_in * reqs, 4)
         seg["api_cache_cost"] = round((cache_t / 1e6) * p_cache * reqs, 4)
         seg["api_output_cost"] = round((out_t / 1e6) * p_out * reqs, 4)
@@ -762,6 +764,96 @@ def _enrich_with_costs(data: dict) -> None:
     data["price_source"] = price_source
     data["token_source"] = token_source
     data["ollama_monthly"] = round(monthly_cost, 2)
+
+    # ── session-level API equivalent cost ──
+    session_segs = data.get("session_models") or []
+    session_api_total = 0.0
+    session_priced_requests = 0
+    session_unpriced = []
+    for seg in session_segs:
+        reqs = max(int(seg.get("requests") or 0), 0)
+        in_t, out_t, cache_t, _ = _token_profile(seg["model"])
+        prompt_t = in_t + cache_t
+        seg["avg_uncached_input_tokens"] = round(in_t)
+        seg["avg_cache_tokens"] = round(cache_t)
+        seg["avg_prompt_tokens"] = round(prompt_t)
+        seg["avg_in_tokens"] = round(prompt_t)
+        seg["avg_out_tokens"] = round(out_t)
+        seg["total_uncached_input_tokens"] = round(in_t * reqs)
+        seg["total_cache_read_tokens"] = round(cache_t * reqs)
+        seg["total_prompt_tokens"] = round(prompt_t * reqs)
+        seg["total_in_tokens"] = round(prompt_t * reqs)
+        seg["total_out_tokens"] = round(out_t * reqs)
+
+        prices = _lookup_price(api_prices, seg["model"])
+        if not prices:
+            session_unpriced.append(seg["model"])
+            seg["api_session_cost"] = None
+            continue
+        p_in, p_out, p_cache_published = prices
+        p_in = float(p_in)
+        p_out = float(p_out)
+        p_cache = p_in if p_cache_published is None else float(p_cache_published)
+        per_req = (in_t / 1e6) * p_in + (cache_t / 1e6) * p_cache + (out_t / 1e6) * p_out
+        model_session_cost = per_req * reqs
+        session_api_total += model_session_cost
+        session_priced_requests += reqs
+        seg["api_session_cost"] = round(model_session_cost, 4)
+
+    total_session_reqs = sum(max(int(s.get("requests") or 0), 0) for s in session_segs)
+    session_complete = bool(total_session_reqs) and session_priced_requests == total_session_reqs
+    data["api_session_known_total"] = round(session_api_total, 4) if session_priced_requests else None
+    data["api_session_total"] = data["api_session_known_total"] if session_complete else None
+    data["api_session_coverage_pct"] = round(
+        session_priced_requests / total_session_reqs * 100.0, 2
+    ) if total_session_reqs else None
+    data["api_session_unpriced"] = session_unpriced
+
+    # Per-model Ollama effective $/1M. The settings page exposes each model's
+    # share of the weekly usage bar. Allocate the fixed 7-day plan equivalent
+    # by that share, then divide by estimated model tokens. The official API
+    # lacks usage-bar shares,
+    # so API-only mode must not fabricate per-model Ollama prices.
+    is_cookie = data.get("source") == "cookie"
+    positive_share_total = sum(
+        max(float(seg.get("share_pct") or 0), 0.0) for seg in weekly_segs
+    )
+
+    weekly_used_fraction = max(float(data.get("weekly_used_pct") or 0), 0.0) / 100.0
+
+    for seg in weekly_segs:
+        seg["plan_rate_basis"] = None
+        if is_cookie:
+            gpu_share = seg.get("share_pct")
+            reqs = max(int(seg.get("requests") or 0), 0)
+            if gpu_share is not None and gpu_share > 0 and reqs > 0 and positive_share_total > 0:
+                model_tokens = (
+                    seg.get("avg_uncached_input_tokens", 0)
+                    + seg.get("avg_cache_tokens", 0)
+                    + seg.get("avg_out_tokens", 0)
+                )
+                seg["plan_effective_per_1m"] = round(
+                    weekly_equivalent * weekly_used_fraction * (gpu_share / positive_share_total)
+                    / (model_tokens * reqs) * 1e6,
+                    9,
+                ) if model_tokens > 0 else None
+                seg["plan_rate_basis"] = "ollama_usage_bar+historical_tokens"
+            else:
+                seg["plan_effective_per_1m"] = None
+        else:
+            seg["plan_effective_per_1m"] = None
+        if seg.get("plan_effective_per_1m") is not None and seg.get("api_effective_per_1m"):
+            seg["plan_pct_of_api"] = round(
+                seg["plan_effective_per_1m"] / seg["api_effective_per_1m"] * 100, 1
+            )
+        else:
+            seg["plan_pct_of_api"] = None
+    data["plan_rate_allocation_basis"] = (
+        "7-day plan equivalent × observed weekly quota fraction × normalized usage-bar share, "
+        "divided by estimated model tokens"
+        if is_cookie else
+        "Unavailable in API-only mode: /api/usage has no per-model quota weights"
+    )
 
     if api_window_total is not None and api_window_total > 0:
         savings = api_window_total - weekly_equivalent
@@ -1268,28 +1360,13 @@ def _fetch_usage() -> dict:
         data["fetched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         return data
 
+    # Primary: cookie scrape (has GPU-weighted bar widths).
     try:
-        # Primary: official API (no cookie, no HTML parsing).
-        api_key = _load_api_key()
-        if api_key:
-            try:
-                api_data = _fetch_usage_api(api_key)
-                data = _api_to_usage(api_data)
-                data["cached"] = False
-                data["fetched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                data["ok"] = True
-                _cache["ts"] = now
-                _cache["data"] = data
-                _record_history(data)
-                _record_session(data)
-                return data
-            except Exception as e:
-                logger.warning("Official API failed (%s), falling back to cookie scrape", e)
-
-        # Fallback: cookie scrape of the settings page.
         cookie = _load_cookie()
         html = _fetch_settings_page(cookie)
         data = _parse_usage(html)
+        if data.get("session_used_pct") is None or data.get("weekly_used_pct") is None:
+            raise ValueError("settings page did not contain usage limits")
         data["cached"] = False
         data["fetched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         data["ok"] = True
@@ -1298,15 +1375,33 @@ def _fetch_usage() -> dict:
         _record_history(data)
         _record_session(data)
         return data
-    except FileNotFoundError as e:
-        return {"ok": False, "error": "cookie_not_configured", "detail": str(e)}
+    except FileNotFoundError:
+        pass  # no cookie file, try API
     except Exception as e:
-        logger.warning("Ollama usage fetch failed: %s", e)
-        return {
-            "ok": False,
-            "error": "fetch_failed",
-            "detail": "cookie expired or settings page changed",
-        }
+        logger.warning("Cookie scrape failed (%s), trying API fallback", e)
+
+    # Fallback: official API (no GPU bar widths).
+    api_key = _load_api_key()
+    if api_key:
+        try:
+            api_data = _fetch_usage_api(api_key)
+            data = _api_to_usage(api_data)
+            data["cached"] = False
+            data["fetched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            data["ok"] = True
+            _cache["ts"] = now
+            _cache["data"] = data
+            _record_history(data)
+            _record_session(data)
+            return data
+        except Exception as e:
+            logger.warning("API fallback also failed: %s", e)
+
+    return {
+        "ok": False,
+        "error": "fetch_failed",
+        "detail": "cookie expired or settings page changed",
+    }
 
 
 @router.get("/usage")

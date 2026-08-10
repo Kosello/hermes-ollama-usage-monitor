@@ -25,9 +25,9 @@ Then add the desktop plugin (`desktop/plugin.js` → `~/.hermes/desktop-plugins/
 - **Statusbar chip** — always-visible `Pro S25% W35%` summary, color-coded (yellow ≥75%, red ≥90%)
 - **Desktop pane** — full details:
   - Session & weekly usage % + reset times
-  - **Per-model breakdown** — request counts and request share (session + weekly)
+  - **Per-model breakdown** — request counts and Ollama usage-bar share (session + weekly)
   - **API-equivalent cost** — estimated **$/request** and cache-aware effective **$/1M tokens**
-  - **Effective subscription cost** — fixed plan price allocated across all requests, never misrepresented as per-model quota cost
+  - **Plan vs API** — estimated Ollama $/1M versus real API $/1M for each model, plus Ollama/API percentage
   - **Weekly history** — last 8 weeks of usage snapshots with trend arrow (↑/↓/→)
 - **Threshold alerts** — macOS notification when weekly usage crosses 75% (warning) / 90% (critical), once per threshold per week
 - **Daily usage line** — one short summary in chat every morning (`📊 Ollama Cloud: weekly 44.7% · session 81.6% · top: glm-5.2`)
@@ -35,7 +35,7 @@ Then add the desktop plugin (`desktop/plugin.js` → `~/.hermes/desktop-plugins/
 
 ## Why
 
-Ollama Cloud exposes a **JSON usage API** at `ollama.com/api/usage` — this plugin uses it as the primary data source. For the plan tier (Pro/Free/Max), which the API doesn't expose, it falls back to a lightweight cookie scrape of the settings page. The cookie path is also kept as a full fallback if the API key isn't configured. Ollama's dashboard forgets everything when the week resets — this plugin keeps a **local history** that survives resets.
+The authenticated settings page is the primary source because its per-model bar widths expose each model's share of Ollama usage. `GET /api/usage` is the fallback: it provides aggregate quota percentages and request counts, but not per-model quota weights, exact resets, or plan tier. API-only mode therefore shows API prices but deliberately leaves per-model Ollama $/1M unavailable. Ollama's dashboard forgets everything when the week resets — this plugin keeps a **local history** that survives resets.
 
 ## Install
 
@@ -56,26 +56,21 @@ cp desktop/plugin.js ~/.hermes/desktop-plugins/ollama-usage-monitor/
 
 Then in the app: **⌘K → Reload desktop plugins**
 
-### 3. API key (recommended — no cookie needed)
+### 3. Cookie (primary source)
 
-Ollama exposes a JSON API at `https://ollama.com/api/usage`. You need an API key:
+- **macOS Keychain** (recommended on macOS):
+  ```bash
+  security add-generic-password -s hermes-ollama-cookie -a ollama -w '<cookie>' -U
+  ```
+- **or a plain file** (works on any OS):
+  ```bash
+  echo '__Secure-session=<value>' > ~/.hermes/ollama_cookie.txt
+  chmod 600 ~/.hermes/ollama_cookie.txt
+  ```
 
-1. Log in to [ollama.com](https://ollama.com)
-2. Open DevTools (`F12` or `⌘+Option+I`) → **Network** tab
-3. Navigate to [ollama.com/settings](https://ollama.com/settings)
-4. Find the request to `/api/usage` — look at the `Authorization` header
-5. Copy the key (format: `xxxxxxxxxxxxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxx`)
+Get `__Secure-session` from the browser's DevTools → Application/Storage → Cookies → `https://ollama.com`. It is an HttpOnly login token; keep it private. The plugin uses it to fetch the settings page because that page includes the per-model usage-bar shares required for Ollama $/1M estimates.
 
-Store it:
-
-```bash
-echo 'YOUR_API_KEY' > ~/.hermes/ollama_api_key.txt
-chmod 600 ~/.hermes/ollama_api_key.txt
-```
-
-Or via environment variable: `export OLLAMA_API_KEY=YOUR_API_KEY`
-
-**The API key doesn't expire with browser sessions** — it's a persistent credential tied to your account, so you set it once and forget it.
+Storage selection via `OLLAMA_COOKIE_SOURCE`: `auto` (default), `keychain`, or `file`.
 
 ### 4. Plan tier (optional — defaults to Pro)
 
@@ -90,36 +85,16 @@ The API doesn't expose your plan tier (Pro/Free/Max), which affects budget calcu
 
 If none are set, the plugin tries to scrape the plan from the cookie. If that also fails, it defaults to Pro ($20/mo).
 
-### 5. Cookie (optional fallback)
+### 5. API key (fallback)
 
-- **macOS Keychain** (recommended on macOS):
-  ```bash
-  security add-generic-password -s hermes-ollama-cookie -a ollama -w '<cookie>' -U
-  ```
-- **or a plain file** (works on any OS):
-  ```bash
-  echo '__Secure-session=<value>' > ~/.hermes/ollama_cookie.txt
-  chmod 600 ~/.hermes/ollama_cookie.txt
-  ```
+If the cookie is absent or expired, the plugin tries `GET https://ollama.com/api/usage` using `~/.hermes/ollama_api_key.txt` or `OLLAMA_API_KEY`:
 
-**How to get the cookie value:**
+```bash
+echo 'YOUR_API_KEY' > ~/.hermes/ollama_api_key.txt
+chmod 600 ~/.hermes/ollama_api_key.txt
+```
 
-1. Log in to [ollama.com](https://ollama.com) in your browser
-2. Open DevTools:
-   - **Chrome/Edge/Firefox:** `F12` or `⌘+Option+I` → **Application** tab → **Storage** → **Cookies** → `https://ollama.com`
-   - **Safari:** `⌘+Option+I` → **Storage** tab → **Cookies** → `https://ollama.com`
-3. Find the cookie named `__Secure-session`
-4. Double-click the **Value** cell, select all (`⌘+A`), copy (`⌘+C`)
-   - ✅ Make sure the **"Show URL-decoded"** checkbox is **checked** — the raw value is a base64 string starting with `YWdl…`
-   - The cookie is **HttpOnly** (can't be read via JavaScript), so DevTools is the only way
-5. Paste it into the file or Keychain command above (without the `__Secure-session=` prefix — the plugin adds that automatically)
-
-**Note:** The cookie expires periodically (roughly every 2 months). If the plugin shows "Unavailable" and you're using cookie-only mode, repeat steps 3–5 with the fresh value. With the API key configured, the cookie is only needed for plan tier detection.
-
-**Storage selection** via env var `OLLAMA_COOKIE_SOURCE`:
-- `auto` (default) — Keychain if a cookie is stored there, otherwise the file
-- `keychain` — Keychain only (errors if empty)
-- `file` — file only (no Keychain dependency)
+The API fallback preserves aggregate usage percentages and request counts. It cannot reproduce per-model Ollama $/1M because it does not expose settings-page usage-bar shares, current-window tokens/cache, exact reset timestamps, or plan tier.
 
 ### 6. Restart
 
@@ -152,16 +127,16 @@ The watchdog is **silent** until a threshold is crossed (no token cost, no spam)
 
 ## Cost methodology
 
-Ollama exposes aggregate quota utilization and per-model request counts, but **not** current-window token counts, per-request quota usage, per-model quota consumption, or its internal cache weighting. The plugin therefore keeps two different measurements separate.
+Ollama's authenticated settings page exposes aggregate quota utilization, per-model request counts, and each model's **share of the usage bar**. The public API exposes the first two, but not the bar shares. The plugin therefore uses the cookie-backed settings page first and the API only as a limited fallback.
 
-### Fixed subscription economics
+### Estimated Ollama $/1M
 
 ```text
-7-day plan equivalent = monthly plan price / 4.348
-effective plan $/req   = 7-day plan equivalent / current-window requests
+allocated plan value = 7-day plan equivalent × normalized model usage-bar share
+Ollama $/1M          = allocated plan value / estimated model tokens × 1,000,000
 ```
 
-This is an allocation of the fixed subscription fee, not money “consumed” by the quota percentage. There is deliberately no per-model Ollama cost: the public API does not provide enough data to calculate one.
+This is an effective plan-price estimate—not an Ollama token tariff. The full fixed 7-day plan equivalent is allocated across models by Ollama's own usage-bar shares, normalized so rounded bars reconcile exactly to the plan fee; it is never scaled down by the percentage of quota used. Token volume comes from historical Hermes averages because Ollama does not expose current-window tokens or cache reads. A bar rounded to `0.0%` is reported as unavailable rather than guessed. API-only mode also reports per-model Ollama $/1M as unavailable because request share is not quota share.
 
 ### API-equivalent estimate
 
@@ -172,6 +147,8 @@ $/req = uncached_input × input_rate
 
 effective $/1M = $/req / ((uncached_input + cached_input + output) / 1,000,000)
 ```
+
+The **Plan vs API** table compares each model's estimated Ollama effective $/1M with its real pay-per-token API effective $/1M. `Ollama/API` shows the Ollama estimate as a percentage of the API estimate; lower means better subscription value. API input/cache/output component rates are displayed separately.
 
 Historical Hermes usage stores uncached input and cache-read input as separate canonical buckets. Request counts come from Ollama. Token mix comes from historical Hermes `session_model_usage` averages; an unknown model uses the request-weighted all-model average, then a 1000-input/500-output fallback when no local data exists. Prices use this per-model chain:
 
@@ -188,7 +165,7 @@ Manual entries merge on top of automatic data; a partial override does not hide 
 
 ## Caveats
 
-- **Cookie scraping is brittle** — if Ollama changes their settings page markup or the cookie expires, the plugin shows "Unavailable". Re-extract the cookie and it's back.
+- **Cookie scraping is brittle** — if Ollama changes its settings markup or the cookie expires, the tool falls back to `/api/usage`; per-model Ollama $/1M remains unavailable until the cookie is refreshed.
 - The cookie is a login token — keep it private (Keychain, or `chmod 600` on the file).
 - API-equivalent values are estimates based on historical token mix, not Ollama's current-window token telemetry. They explain pay-per-token economics; they do not explain Ollama's proprietary quota percentage exactly.
 - Works only in the Hermes **desktop** app (the backend loads via the gateway; the chip/pane need the desktop UI). The `/ollama` slash command from the [community plugin](https://github.com/3L0935/hermes-plugins) covers CLI/TUI. For non-Hermes users, see the **Standalone CLI** below.
@@ -214,7 +191,11 @@ python standalone/ollama-cloud-watch.py --alert
 python standalone/ollama-cloud-watch.py --report --open
 
 # Serve the self-contained dashboard
-python standalone/ollama-cloud-watch.py --serve --port 8080
+python standalone/ollama-cloud-watch.py --serve
+
+# When Hermes API already uses IPv4 port 8642, keep it working and bind the
+# dashboard to IPv6 loopback at the same localhost URL:
+python standalone/ollama-cloud-watch.py --serve --host ::1 --port 8642
 ```
 
 **Recommended API-key setup:**

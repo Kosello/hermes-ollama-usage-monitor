@@ -49,6 +49,8 @@ def main() -> int:
     mod._resolve_api_prices = lambda: (mod._BUILTIN_PRICES, "builtin defaults")
     data = mod._parse_usage(html)
 
+    assert data["source"] == "cookie"
+    assert data["share_basis"] == "ollama_usage_bar"
     assert data["plan"] == "Pro", f"plan: {data['plan']}"
     assert data["session_used_pct"] == 24.7, data["session_used_pct"]
     assert data["weekly_used_pct"] == 41.1, data["weekly_used_pct"]
@@ -83,10 +85,30 @@ def main() -> int:
     assert abs(by["glm-5.2"]["api_weekly_cost"] - 0.09972) < 0.001, by["glm-5.2"]["api_weekly_cost"]
     assert by["minimax-m3"]["api_cost_per_req"] == 0.0009, by["minimax-m3"]["api_cost_per_req"]
     assert "fixed fallback" in data["api_assumption"], data["api_assumption"]
-    # Per-model quota cost is unknowable; only the overall plan/API comparison exists.
+    # The API-dollar fields remain separate from Ollama's quota allocation.
     assert by["glm-5.2"]["api_cost_pct"] is None
     assert data["api_total_pct"] is not None and data["api_total_pct"] > 0, data["api_total_pct"]
     assert data["api_monthly_proj"] is None
+
+    # Cookie usage-bar widths drive per-model Ollama $/1M. The fixture has
+    # 95.2% of the weekly bar assigned to glm and only 4.1% to flash despite
+    # their request counts being closer, so their Ollama rates must diverge.
+    priced_models = [m for m in data["weekly_models"] if m.get("api_effective_per_1m") is not None]
+    assert len(priced_models) == len(data["weekly_models"]), "all fixture models should be priced"
+    for m in priced_models:
+        assert m["plan_effective_per_1m"] is not None
+        assert m["plan_pct_of_api"] is not None
+        assert m["plan_pct_of_api"] > 0, m["plan_pct_of_api"]
+    assert by["glm-5.2"]["plan_effective_per_1m"] > by["deepseek-v4-flash:0731"]["plan_effective_per_1m"] * 5
+    # The model allocations must reconcile to: weekly_equivalent × weekly_used_fraction
+    allocated = sum(
+        m["plan_effective_per_1m"] / 1e6
+        * (m["avg_uncached_input_tokens"] + m["avg_cache_tokens"] + m["avg_out_tokens"])
+        * m["requests"]
+        for m in data["weekly_models"]
+    )
+    expected_alloc = data["subscription_weekly_equivalent"] * (data["weekly_used_pct"] / 100.0)
+    assert abs(allocated - expected_alloc) < 0.0001, (allocated, expected_alloc)
 
     # Official API exposes no reset timestamp. Activity period end is not a
     # quota reset and must never be extrapolated from usage percentage.
@@ -94,19 +116,27 @@ def main() -> int:
         "activity": {"period": {"ending_at": "2026-08-09T17:30:58.790970649Z"}},
         "limits": {
             "session": {"usage": 0.2, "models": []},
-            "weekly": {"usage": 0.4, "models": []},
+            "weekly": {"usage": 0.4, "models": [
+                {"name": "glm-5.2", "request_count": 10},
+            ]},
         },
     })
+    assert api_data["reset_unavailable"] is True
+    assert api_data["reset_estimated"] is False
     assert api_data["session_reset_iso"] is None
     assert api_data["weekly_reset_iso"] is None
-    assert api_data["reset_unavailable"] is True
+    assert api_data["source"] == "api"
+    assert api_data["weekly_models"][0]["plan_effective_per_1m"] is None
+    assert api_data["weekly_models"][0]["plan_pct_of_api"] is None
 
     # Free tier must not divide by zero.
-    free = {"plan": "Free", "weekly_used_pct": 50.0,
+    free = {"plan": "Free", "source": "cookie", "weekly_used_pct": 50.0,
             "weekly_models": [{"model": "gpt-oss:120b", "requests": 2, "share_pct": 100.0}]}
     mod._enrich_with_costs(free)
     assert free["subscription_weekly_equivalent"] == 0.0
     assert free["effective_subscription_cost_per_req"] == 0.0
+    assert free["weekly_models"][0]["plan_effective_per_1m"] == 0.0
+    assert free["weekly_models"][0]["plan_pct_of_api"] == 0.0
     # A missing published cache rate falls back to the input rate, never free cache.
     assert free["weekly_models"][0]["api_cache_price_published"] is False
     assert free["weekly_models"][0]["api_cache_per_1m"] == free["weekly_models"][0]["api_input_per_1m"]
@@ -128,7 +158,7 @@ def main() -> int:
     # feed savings/break-even calculations.
     mod._resolve_api_prices = lambda: ({"priced": (1.0, 1.0, 1.0)}, "test")
     mod._resolve_token_averages = lambda overrides: ({}, "fallback")
-    partial = {"plan": "Pro", "weekly_used_pct": 1.0, "weekly_models": [
+    partial = {"plan": "Pro", "source": "cookie", "weekly_used_pct": 1.0, "weekly_models": [
         {"model": "priced", "requests": 1, "share_pct": 50.0},
         {"model": "unpriced", "requests": 1, "share_pct": 50.0},
     ]}
@@ -137,6 +167,10 @@ def main() -> int:
     assert partial["api_known_window_total"] is not None
     assert partial["api_window_total"] is None
     assert partial["api_total_pct"] is None
+    # Ollama $/1M depends on plan allocation + tokens, not API price coverage.
+    unpriced = next(m for m in partial["weekly_models"] if m["model"] == "unpriced")
+    assert unpriced["plan_effective_per_1m"] is not None
+    assert unpriced["plan_pct_of_api"] is None
 
     # Documented dictionary overrides normalize to numeric tuples.
     with tempfile.TemporaryDirectory() as td:
