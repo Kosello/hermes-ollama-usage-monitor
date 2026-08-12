@@ -19,7 +19,7 @@ const SECTION_KEYS = [
   'savings', 'limits', 'session_models', 'weekly_models',
   'cache_hit', 'token_volume',
   'api_cost', 'cost_efficiency',
-  'usage_pct', 'price_comparison',
+  'usage_pct', 'price_comparison', 'cache_break_even', 'lifetime_break_even',
   'history', 'reports',
 ]
 const SECTION_LABELS = {
@@ -33,6 +33,8 @@ const SECTION_LABELS = {
   cost_efficiency:'Plan vs API',
   usage_pct:      'API usage percentage',
   price_comparison:'Price comparison',
+  cache_break_even:'Cache break-even',
+  lifetime_break_even:'Lifetime break-even & price comparison',
   history:        'Weekly history',
   reports:        'Reports',
 }
@@ -67,6 +69,14 @@ function useLifetime(ctx) {
   return useQuery({
     queryKey: [ctx.source, 'lifetime'],
     queryFn: () => ctx.rest('/usage/lifetime'),
+    staleTime: 300000,
+    retry: 1
+  })
+}
+function useLifetimeBreakEven(ctx) {
+  return useQuery({
+    queryKey: [ctx.source, 'lifetime-break-even'],
+    queryFn: () => ctx.rest('/usage/lifetime-break-even'),
     staleTime: 300000,
     retry: 1
   })
@@ -222,6 +232,7 @@ function UsagePane({ ctx }) {
   const { data, isLoading, refetch } = useUsage(ctx)
   const { data: hist } = useHistory(ctx)
   const { data: lifetime } = useLifetime(ctx)
+  const { data: lifetimeBE } = useLifetimeBreakEven(ctx)
   const [reports, setReports] = useState(null)
   const qc = useQueryClient()
 
@@ -571,7 +582,13 @@ function UsagePane({ ctx }) {
               className: 'flex items-center justify-between gap-2 tabular-nums',
               children: [
                 jsx('span', { className: 'truncate text-(--ui-text-quaternary)', children: m.model }),
-                jsx('span', { className: 'shrink-0 text-(--ui-text-secondary)', children: `$${m.api_session_cost.toFixed(4)}` })
+                jsxs('span', { className: 'shrink-0 text-(--ui-text-secondary) text-right', children: [
+                  `$${m.api_session_cost.toFixed(4)}`,
+                  m.api_session_cost_cached != null ? jsx('div', {
+                    className: 'text-(--ui-text-quaternary) text-[0.625rem]',
+                    children: `with cache (${m.api_real_cache_pct != null ? m.api_real_cache_pct.toFixed(0) : '?'}%): $${m.api_session_cost_cached.toFixed(4)}`
+                  }) : null
+                ]})
               ]
             }, 's-' + m.model))
           ]}) : null,
@@ -584,7 +601,13 @@ function UsagePane({ ctx }) {
               className: 'flex items-center justify-between gap-2 tabular-nums',
               children: [
                 jsx('span', { className: 'truncate text-(--ui-text-quaternary)', children: m.model }),
-                jsx('span', { className: 'shrink-0 text-(--ui-text-secondary)', children: `$${m.api_weekly_cost.toFixed(4)}` })
+                jsxs('span', { className: 'shrink-0 text-(--ui-text-secondary) text-right', children: [
+                  `$${m.api_weekly_cost.toFixed(4)}`,
+                  m.api_weekly_cost_cached != null ? jsx('div', {
+                    className: 'text-(--ui-text-quaternary) text-[0.625rem]',
+                    children: `with cache (${m.api_real_cache_pct != null ? m.api_real_cache_pct.toFixed(0) : '?'}%): $${m.api_weekly_cost_cached.toFixed(4)}`
+                  }) : null
+                ]})
               ]
             }, 'w-' + m.model))
           ]}) : null,
@@ -715,6 +738,88 @@ function UsagePane({ ctx }) {
             })
           }),
           jsx('div', { className: 'text-(--ui-text-quaternary) text-[0.625rem]', children: 'Ollama: subscription allocated by usage-bar share. API: pay-per-token estimate.' })
+        ]})
+      }))
+    }
+
+    // ── Cache break-even: at what cache hit rate does the API get cheaper? ──
+    if (settings.cache_break_even && data.source === 'cookie') {
+      const beRows = (data.weekly_models || []).filter(m => m.api_break_even_cache_pct != null)
+      if (beRows.length > 0) {
+        rows.push(jsx(Collapsible, {
+          title: SECTION_LABELS.cache_break_even,
+          defaultOpen: false,
+          children: jsxs('div', { className: 'space-y-1', children: [
+            jsx('div', {
+              className: 'text-(--ui-text-quaternary) text-xs',
+              children: 'Cache hit rate at which the pay-per-token API becomes cheaper than the subscription, per model'
+            }),
+            jsx('div', {
+              className: 'rounded border border-(--ui-stroke-secondary) overflow-hidden',
+              children: beRows.map(m => {
+                const be = m.api_break_even_cache_pct
+                const cur = m.cache_hit_pct
+                const realRate = m.api_real_cache_pct
+                let line
+                if (be > 100) line = '>100% (plan always cheaper)'
+                else if (be <= 0) line = '0% (API always cheaper)'
+                else line = `API cheaper above ${be.toFixed(0)}% cache hit`
+                if (cur != null && be > 0 && be <= 100) line += ` · you: ${cur.toFixed(0)}%`
+                if (realRate != null) line += ` · real API: ${realRate.toFixed(0)}%`
+                return jsxs('div', {
+                  className: 'px-2 py-1.5 border-b last:border-b-0 border-(--ui-stroke-secondary) tabular-nums flex items-center justify-between gap-2',
+                  children: [
+                    jsx('span', { className: 'truncate text-(--ui-text-secondary)', children: m.model }),
+                    jsx('span', { className: 'shrink-0 text-(--ui-text-secondary)', children: line })
+                  ]
+                }, m.model)
+              })
+            }),
+            jsx('div', { className: 'text-(--ui-text-quaternary) text-[0.625rem]', children: 'Above the break-even, the API is cheaper for that model; below it, the subscription wins. Uses your observed cache hit rate.' })
+          ]})
+        }))
+      }
+    }
+
+    // ── Lifetime break-even & price comparison (aggregated saved weeks) ──
+    if (settings.lifetime_break_even && lifetimeBE && lifetimeBE.ok !== false && (lifetimeBE.models || []).length > 0) {
+      const ltModels = (lifetimeBE.models || []).filter(m => m.api_break_even_cache_pct != null || m.api_effective_per_1m != null)
+      rows.push(jsx(Collapsible, {
+        title: SECTION_LABELS.lifetime_break_even,
+        defaultOpen: false,
+        children: jsxs('div', { className: 'space-y-1', children: [
+          jsx('div', {
+            className: 'text-(--ui-text-quaternary) text-xs',
+            children: `Aggregated over ${lifetimeBE.weeks_count ?? 0} saved week(s) · ${fmtTokens(lifetimeBE.total_requests ?? 0)} requests · $${(lifetimeBE.subscription_total_equivalent ?? 0).toFixed(2)} plan equivalent`
+          }),
+          jsx('div', {
+            className: 'rounded border border-(--ui-stroke-secondary) overflow-hidden',
+            children: ltModels.map(m => {
+              const be = m.api_break_even_cache_pct
+              let beLine
+              if (be > 100) beLine = '>100% (plan always cheaper)'
+              else if (be <= 0) beLine = '0% (API always cheaper)'
+              else beLine = `API cheaper above ${be.toFixed(0)}% cache hit`
+              if (m.api_real_cache_pct != null) beLine += ` · real API: ${m.api_real_cache_pct.toFixed(0)}%`
+              const apiLine = m.api_effective_per_1m != null ? `$${fmtPerMillion(m.api_effective_per_1m)}/1M` : 'n/a'
+              return jsxs('div', {
+                className: 'px-2 py-1.5 border-b last:border-b-0 border-(--ui-stroke-secondary) tabular-nums',
+                children: [
+                  jsxs('div', {
+                    className: 'flex items-center justify-between gap-2',
+                    children: [
+                      jsx('span', { className: 'truncate text-(--ui-text-secondary)', children: m.model }),
+                      jsxs('span', { className: 'shrink-0 text-(--ui-text-secondary)', children: [
+                        fmtTokens(m.requests ?? 0), ' req · API ', apiLine
+                      ]})
+                    ]
+                  }),
+                  jsx('div', { className: 'text-right text-(--ui-text-quaternary) text-[0.625rem]', children: beLine })
+                ]
+              }, m.model)
+            })
+          }),
+          jsx('div', { className: 'text-(--ui-text-quaternary) text-[0.625rem]', children: `Prices: ${lifetimeBE.price_source || 'builtin'} · Tokens: ${lifetimeBE.token_source || 'unknown'}. Break-even = cache hit rate at which the API would have been cheaper over the recorded period.` })
         ]})
       }))
     }

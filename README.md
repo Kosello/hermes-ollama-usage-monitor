@@ -5,7 +5,7 @@
 > (stale cache, parser breakage when Ollama changes their HTML, price-chain
 > mismatches). If something breaks, [open an issue](https://github.com/Kosello/hermes-ollama-usage-monitor/issues).
 
-Live Ollama Cloud usage in Hermes Agent — session & weekly quotas, per-model request counts, weekly history, honest subscription/API comparisons, and threshold alerts, right in the desktop app. Plus a **standalone CLI** that works without Hermes.
+Live Ollama Cloud usage in Hermes Agent — session & weekly quotas, per-model request counts, weekly history, honest subscription/API comparisons with cache break-even analysis, and threshold alerts, right in the desktop app. Plus a **standalone CLI** that works without Hermes.
 
 ![Ollama Cloud](https://img.shields.io/badge/ollama-cloud-000000?logo=ollama&logoColor=white)
 ![CI](https://github.com/Kosello/hermes-ollama-usage-monitor/actions/workflows/ci.yml/badge.svg)
@@ -23,11 +23,15 @@ Then add the desktop plugin (`desktop/plugin.js` → `~/.hermes/desktop-plugins/
 ## What it shows
 
 - **Statusbar chip** — always-visible `Pro S25% W35%` summary, color-coded (yellow ≥75%, red ≥90%)
-- **Desktop pane** — full details:
+- **Desktop pane** — full details, each section toggleable via ⚙:
   - Session & weekly usage % + reset times
   - **Per-model breakdown** — request counts and Ollama usage-bar share (session + weekly)
-  - **API-equivalent cost** — estimated **$/request** and cache-aware effective **$/1M tokens**
+  - **API-equivalent cost** — actual $ cost of tokens consumed on Ollama, priced as if they went through the API. Per-model breakdown with a **cache-aware second line** showing the cost at your real provider cache hit rate
   - **Plan vs API** — estimated Ollama $/1M versus real API $/1M for each model, plus Ollama/API percentage
+  - **Cache break-even** — per model, the cache hit rate at which the API becomes cheaper than the subscription. Shows your **real API cache rate** from other provider keys (DeepSeek, OpenRouter, etc.)
+  - **Lifetime break-even** — aggregated over all saved weeks: per-model break-even and API price comparison with real cache rates
+  - **API usage percentage** — compact Ollama/API ratio per model
+  - **Price comparison** — raw $/1M numbers side by side
   - **Weekly history** — last 8 weeks of usage snapshots with trend arrow (↑/↓/→)
 - **Threshold alerts** — macOS notification when weekly usage crosses 75% (warning) / 90% (critical), once per threshold per week
 - **Daily usage line** — one short summary in chat every morning (`📊 Ollama Cloud: weekly 44.7% · session 81.6% · top: glm-5.2`)
@@ -132,21 +136,43 @@ Ollama's authenticated settings page exposes aggregate quota utilization, per-mo
 ### Estimated Ollama $/1M
 
 ```text
-allocated plan value = 7-day plan equivalent × normalized model usage-bar share
+allocated plan value = 7-day plan equivalent × observed weekly quota fraction × normalized model usage-bar share
 Ollama $/1M          = allocated plan value / estimated model tokens × 1,000,000
 ```
 
-This is an effective plan-price estimate—not an Ollama token tariff. The full fixed 7-day plan equivalent is allocated across models by Ollama's own usage-bar shares, normalized so rounded bars reconcile exactly to the plan fee; it is never scaled down by the percentage of quota used. Token volume comes from historical Hermes averages because Ollama does not expose current-window tokens or cache reads. A bar rounded to `0.0%` is reported as unavailable rather than guessed. API-only mode also reports per-model Ollama $/1M as unavailable because request share is not quota share.
+This is an effective plan-price estimate—not an Ollama token tariff. The fixed 7-day plan equivalent is scaled by the observed weekly quota fraction (so a week that's only 3% used doesn't get the full plan fee), then allocated across models by Ollama's own usage-bar shares, normalized so rounded bars reconcile exactly. Token volume comes from historical Hermes averages because Ollama does not expose current-window tokens or cache reads. A bar rounded to `0.0%` is reported as unavailable rather than guessed. API-only mode also reports per-model Ollama $/1M as unavailable because request share is not quota share.
 
-### API-equivalent estimate
+### API-equivalent cost
 
 ```text
 $/req = uncached_input × input_rate
       + cached_input   × cache_rate
       + output         × output_rate
-
-effective $/1M = $/req / ((uncached_input + cached_input + output) / 1,000,000)
 ```
+
+The **API equivalent cost** section shows the actual $ cost of tokens already consumed on Ollama, priced as if they went through the API. Per model, a **cache-aware second line** shows the cost when the prompt tokens are split by your **real provider cache hit rate** (from other API keys — DeepSeek native, OpenRouter, etc.):
+
+```text
+$/req (cached) = prompt × (1 − cache_rate) × input_rate
+               + prompt × cache_rate       × cache_rate
+               + output                   × output_rate
+```
+
+Real cache rates are resolved per model from Hermes `state.db` (`billing_provider != 'ollama-cloud'`). When the same model was used via several providers, the rate from the provider with the most recorded calls wins (largest sample). OpenRouter is the fallback — native provider keys (DeepSeek, xAI, OpenAI, etc.) take priority because their cache rates reflect real platform behavior.
+
+### Cache break-even
+
+```text
+break-even cache % = the cache hit rate at which API cost = subscription allocation per request
+```
+
+For each model, the break-even is the cache hit rate where the pay-per-token API cost equals the model's subscription allocation. Above it, the API is cheaper; below it, the subscription wins. `>100%` means even perfect caching can't make the API cheaper. The section also shows your **real API cache rate** from other providers — so you can see at a glance whether you're above or below the threshold with your actual usage patterns.
+
+### Lifetime break-even
+
+Aggregates all saved weekly history records: per-model request counts, usage-bar shares, and plan allocations across all recorded weeks. Applies the same break-even math with today's resolved API prices and token profiles. Shows which models were consistently plan-wins versus borderline over the full recorded period.
+
+### Plan vs API table
 
 The **Plan vs API** table compares each model's estimated Ollama effective $/1M with its real pay-per-token API effective $/1M. `Ollama/API` shows the Ollama estimate as a percentage of the API estimate; lower means better subscription value. API input/cache/output component rates are displayed separately.
 

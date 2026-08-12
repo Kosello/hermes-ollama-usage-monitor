@@ -1,5 +1,5 @@
 name: ollama-usage-monitor
-version: "1.2.0"
-description: "Ollama Cloud usage monitor backend — official API usage, plan economics, and API-equivalent estimates for the desktop plugin."
+version: "1.3.0"
+description: "Ollama Cloud usage monitor — cookie-first usage bars, per-model Plan vs API economics, cache break-even analysis, real provider cache rates, cache-aware API cost, lifetime break-even, and weekly history."
 author: kosello
 kind: backend
