@@ -433,22 +433,72 @@ _BUILTIN_PRICES = {
 }
 
 
+# ── Official DeepSeek-V4 API pricing (effective 2026-08-16 16:00 UTC) ──────
+# Peak hours: 01:00–04:00 and 06:00–10:00 UTC; all other hours are off-peak.
+# USD per 1M tokens: input (cache hit), input (cache miss), output.
+_DEEPSEEK_OFFICIAL_PEAK = {
+    "deepseek-v4-flash": (0.014, 0.44, 1.32),
+    "deepseek-v4-pro": (0.044, 1.32, 3.96),
+}
+_DEEPSEEK_OFFICIAL_OFFPEAK = {
+    "deepseek-v4-flash": (0.007, 0.22, 0.66),
+    "deepseek-v4-pro": (0.022, 0.66, 1.98),
+}
+# Peak windows: (start_hour, end_hour) inclusive-exclusive, UTC.
+_DEEPSEEK_PEAK_WINDOWS = ((1, 4), (6, 10))
+_DEEPSEEK_PRICING_EFFECTIVE_TS = 1786896000  # 2026-08-16 16:00 UTC
+
+
+def _is_deepseek_peak_now() -> bool:
+    """True if the current UTC time falls in a DeepSeek peak window."""
+    hour = datetime.now(timezone.utc).hour
+    return any(start <= hour < end for start, end in _DEEPSEEK_PEAK_WINDOWS)
+
+
+def _deepseek_official_price(model: str) -> tuple | None:
+    """Official DeepSeek-V4 (cache-hit, cache-miss, output) rate per 1M tokens.
+
+    Applies the new official pricing when the current UTC time is past the
+    effective timestamp (2026-08-16 16:00 UTC) and the model is one of the
+    two DeepSeek-V4 models. Returns a 3-tuple matching the plugin convention
+    ``(input, output, cached_input)`` where input is the cache-miss rate.
+    """
+    base = model.split(":", 1)[0]
+    if base not in _DEEPSEEK_OFFICIAL_PEAK:
+        return None
+    if time.time() < _DEEPSEEK_PRICING_EFFECTIVE_TS:
+        return None
+    rates = _DEEPSEEK_OFFICIAL_PEAK if _is_deepseek_peak_now() else _DEEPSEEK_OFFICIAL_OFFPEAK
+    cache_hit, cache_miss, output = rates[base]
+    return (cache_miss, output, cache_hit)
+
+
 def _lookup_price(API_PRICES: dict, model: str) -> tuple | None:
     """Resolve a dashboard model name to a price tuple.
 
     Matching order (first hit wins):
+    0. Manual override key (``_resolve_api_prices`` merges these into the dict)
     1. Exact key match
-    2. OpenRouter suffix match with ':' → '-' conversion
+    2. Official DeepSeek-V4 pricing (cache-hit, cache-miss, output) when the
+       model is DeepSeek-V4 and the new official rates are effective — these
+       beat stale OpenRouter snapshots.
+    3. OpenRouter suffix match with ':' → '-' conversion
        (e.g. 'deepseek-v4-flash:0731' → 'deepseek-v4-flash-0731'
         matches 'deepseek/deepseek-v4-flash-0731')
-    3. Normalized suffix match (strip separators, ignore '-it' suffix)
+    4. Normalized suffix match (strip separators, ignore '-it' suffix)
        (e.g. 'gemma4:31b' → 'gemma431b' matches 'google/gemma-4-31b-it')
-    4. Base name (strip ':variant') exact + suffix
+    5. Base name (strip ':variant') exact + suffix
        (e.g. 'deepseek-v4-flash:0731' → 'deepseek-v4-flash'
         matches 'deepseek/deepseek-v4-flash')
     """
     if model in API_PRICES:
         return API_PRICES[model]
+
+    # Official DeepSeek-V4 rates beat stale OpenRouter snapshots, but never
+    # manual overrides (those are already merged into API_PRICES above).
+    official = _deepseek_official_price(model)
+    if official:
+        return official
 
     # Ollama sometimes omits architecture/parameter suffixes used by
     # OpenRouter. Keep these explicit rather than fuzzy-matching the wrong SKU.
@@ -915,6 +965,25 @@ def _enrich_with_costs(data: dict) -> None:
                 seg["api_real_cache_pct"] = _cache_rate_for(
                     seg["model"], _real_provider_cache_hits()
                 )
+                # Cache-aware API effective $/1M: prompt tokens split by the
+                # real provider cache rate, priced at input/cache rates.
+                seg["api_effective_per_1m_cached"] = None
+                seg["plan_pct_of_api_cached"] = None
+                real_cache = seg["api_real_cache_pct"]
+                if real_cache is not None and prompt_t > 0:
+                    uncached_t = prompt_t * (1.0 - real_cache / 100.0)
+                    cached_t = prompt_t * (real_cache / 100.0)
+                    per_req_cached = (
+                        (uncached_t / 1e6) * p_in
+                        + (cached_t / 1e6) * p_cache
+                        + (out_t / 1e6) * p_out
+                    )
+                    api_eff_cached = per_req_cached * 1e6 / tokens_per_req
+                    seg["api_effective_per_1m_cached"] = round(api_eff_cached, 6)
+                    if seg.get("plan_effective_per_1m") is not None and api_eff_cached > 0:
+                        seg["plan_pct_of_api_cached"] = round(
+                            seg["plan_effective_per_1m"] / api_eff_cached * 100, 1
+                        )
     data["plan_rate_allocation_basis"] = (
         "7-day plan equivalent × observed weekly quota fraction × normalized usage-bar share, "
         "divided by estimated model tokens"
@@ -1057,8 +1126,18 @@ def _real_provider_cache_hits() -> dict:
                             cache = float(cache or 0)
                             if inp + cache > 0:
                                 rate = round(cache / (inp + cache) * 100.0, 1)
-                                if model not in best or calls > best[model][0]:
-                                    best[model] = (calls, rate)
+                                # Merge Ollama build-variant suffixes
+                                # (e.g. 'deepseek-v4-flash:0731') into the base
+                                # model name so the largest sample wins across
+                                # variants — a 1-call row with 0 cache must not
+                                # beat 361 calls with 97.8% cache.
+                                key = model
+                                if ":" in model:
+                                    base, _, variant = model.partition(":")
+                                    if variant and variant.isdigit():
+                                        key = base
+                                if key not in best or calls > best[key][0]:
+                                    best[key] = (calls, rate)
                         return {m: r for m, (_c, r) in best.items()}
                 except sqlite3.Error:
                     if table == "sessions":
@@ -1677,6 +1756,22 @@ def _lifetime_break_even() -> dict:
             entry["api_cache_per_1m"] = round(p_cache, 6)
             entry["api_output_per_1m"] = round(p_out, 6)
             entry["api_cache_price_published"] = p_cache_published is not None
+            entry["api_lifetime_cost"] = round(per_req * agg["requests"], 4)
+
+            # Cache-aware lifetime cost using the real provider cache rate.
+            real_cache = _cache_rate_for(model, _real_provider_cache_hits())
+            entry["api_real_cache_pct"] = real_cache
+            if real_cache is not None and prompt_t > 0:
+                uncached_t = prompt_t * (1.0 - real_cache / 100.0)
+                cached_t = prompt_t * (real_cache / 100.0)
+                per_req_cached = (
+                    (uncached_t / 1e6) * p_in
+                    + (cached_t / 1e6) * p_cache
+                    + (out_t / 1e6) * p_out
+                )
+                entry["api_lifetime_cost_cached"] = round(per_req_cached * agg["requests"], 4)
+            else:
+                entry["api_lifetime_cost_cached"] = None
 
             # Per-model subscription allocation: the model's own share of the
             # weekly plan fee across the recorded weeks, per request. This is
@@ -1692,17 +1787,18 @@ def _lifetime_break_even() -> dict:
                     denom = prompt_t * (p_cache - p_in)
                     h = (sub_per_req * 1e6 - prompt_t * p_in - out_t * p_out) / denom
                     entry["api_break_even_cache_pct"] = round(max(h, 0.0) * 100.0, 1)
-                # Real provider cache rate (state.db, non-Ollama providers).
-                entry["api_real_cache_pct"] = _cache_rate_for(
-                    model, _real_provider_cache_hits()
-                )
         models.append(entry)
 
+    priced = [m for m in models if m.get("api_lifetime_cost") is not None]
     return {
         "ok": True,
         "weeks_count": len(weeks),
         "total_requests": total_reqs,
         "subscription_total_equivalent": round(total_plan_equivalent, 4),
+        "api_lifetime_total": round(sum(m["api_lifetime_cost"] for m in priced), 4) if priced else None,
+        "api_lifetime_total_cached": round(
+            sum(m["api_lifetime_cost_cached"] for m in priced if m.get("api_lifetime_cost_cached") is not None), 4
+        ) if any(m.get("api_lifetime_cost_cached") is not None for m in priced) else None,
         "price_source": price_source,
         "token_source": token_source,
         "models": models,

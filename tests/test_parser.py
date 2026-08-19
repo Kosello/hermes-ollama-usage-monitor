@@ -220,9 +220,42 @@ def main() -> int:
     return 0
 
 
+def test_deepseek_official_pricing() -> None:
+    """The official DeepSeek-V4 peak/off-peak table must match the announcement."""
+    # Peak hours: 01:00–04:00 and 06:00–10:00 UTC.
+    assert mod._DEEPSEEK_PEAK_WINDOWS == ((1, 4), (6, 10))
+    assert mod._DEEPSEEK_OFFICIAL_PEAK == {
+        "deepseek-v4-flash": (0.014, 0.44, 1.32),
+        "deepseek-v4-pro": (0.044, 1.32, 3.96),
+    }
+    assert mod._DEEPSEEK_OFFICIAL_OFFPEAK == {
+        "deepseek-v4-flash": (0.007, 0.22, 0.66),
+        "deepseek-v4-pro": (0.022, 0.66, 1.98),
+    }
+    # Returned tuple is (input=cache-miss, output, cached_input=cache-hit).
+    real_peak_fn = mod._is_deepseek_peak_now
+    real_ts = mod._DEEPSEEK_PRICING_EFFECTIVE_TS
+    mod._DEEPSEEK_PRICING_EFFECTIVE_TS = 0  # force effective
+    try:
+        mod._is_deepseek_peak_now = lambda: True
+        assert mod._deepseek_official_price("deepseek-v4-pro") == (1.32, 3.96, 0.044)
+        assert mod._deepseek_official_price("deepseek-v4-flash:0731") == (0.44, 1.32, 0.014)
+        mod._is_deepseek_peak_now = lambda: False
+        assert mod._deepseek_official_price("deepseek-v4-pro") == (0.66, 1.98, 0.022)
+        assert mod._deepseek_official_price("deepseek-v4-flash") == (0.22, 0.66, 0.007)
+        # Non-DeepSeek models are untouched.
+        assert mod._deepseek_official_price("glm-5.2") is None
+    finally:
+        mod._is_deepseek_peak_now = real_peak_fn
+        mod._DEEPSEEK_PRICING_EFFECTIVE_TS = real_ts
+    print("✅ deepseek official pricing test passed")
+
+
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        main_ok = main() == 0
+        pricing_ok = test_deepseek_official_pricing() is not False
+        sys.exit(0 if (main_ok and pricing_ok) else 1)
     except AssertionError as e:
         print(f"❌ smoke test failed: {e}", file=sys.stderr)
         sys.exit(1)

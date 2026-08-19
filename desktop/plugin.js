@@ -18,7 +18,7 @@ const SETTINGS_VERSION = 2
 const SECTION_KEYS = [
   'savings', 'limits', 'session_models', 'weekly_models',
   'cache_hit', 'token_volume',
-  'api_cost', 'cost_efficiency',
+  'api_cost', 'cost_efficiency', 'cost_efficiency_cached',
   'usage_pct', 'price_comparison', 'cache_break_even', 'lifetime_break_even',
   'history', 'reports',
 ]
@@ -31,6 +31,7 @@ const SECTION_LABELS = {
   token_volume:   'Estimated token volume',
   api_cost:       'API equivalent cost',
   cost_efficiency:'Plan vs API',
+  cost_efficiency_cached:'Plan vs API with cache',
   usage_pct:      'API usage percentage',
   price_comparison:'Price comparison',
   cache_break_even:'Cache break-even',
@@ -198,20 +199,22 @@ function UsageChip({ ctx }) {
       className: 'flex flex-col gap-1 p-1 text-xs',
       children: [
         jsx('div', { className: 'font-medium', children: 'Ollama Cloud' }),
-        jsx('div', {
-          className: 'text-(--ui-text-secondary)',
-          children: data?.ok === false
-            ? (data.error === 'cookie_not_configured'
+        data?.ok === false
+          ? jsx('div', {
+              className: 'text-(--ui-text-secondary)',
+              children: data.error === 'cookie_not_configured'
                 ? 'Cookie not configured — add __Secure-session to ~/.hermes/ollama_cookie.txt'
-                : `Unavailable: ${data.error}`)
-            : `${session != null ? `Session ${session.toFixed(1)}% used` : 'Session n/a'} · ${weekly != null ? `Weekly ${weekly.toFixed(1)}% used` : 'Weekly n/a'}`
-        }),
-        jsx('div', {
-          className: 'text-(--ui-text-quaternary)',
-          children: data?.reset_unavailable
-            ? 'Reset timestamps are not exposed by the usage API'
-            : (data?.session_reset ? `Session resets ${data.session_reset}` : '')
-        })
+                : `Unavailable: ${data.error}`
+            })
+          : jsx('div', {
+              className: 'whitespace-pre-line text-(--ui-text-quaternary)',
+              children: data?.reset_unavailable
+                ? 'Reset timestamps are not exposed by the usage API'
+                : [data?.session_reset ? `Session resets ${data.session_reset}` : null,
+                   data?.weekly_reset ? `Weekly resets ${data.weekly_reset}` : null]
+                    .filter(Boolean)
+                    .join('\n')
+            })
       ]
     }),
     children: jsx('button', {
@@ -611,6 +614,25 @@ function UsagePane({ ctx }) {
               ]
             }, 'w-' + m.model))
           ]}) : null,
+          lifetimeBE && lifetimeBE.api_lifetime_total != null ? jsx('div', {
+            className: 'text-(--ui-text-primary) tabular-nums text-sm',
+            children: `Lifetime: $${lifetimeBE.api_lifetime_total.toFixed(4)}${lifetimeBE.api_lifetime_total_cached != null ? ` (with cache: $${lifetimeBE.api_lifetime_total_cached.toFixed(4)})` : ''}`
+          }) : null,
+          lifetimeBE && (lifetimeBE.models || []).some(m => m.api_lifetime_cost != null) ? jsxs('div', { className: 'space-y-0.5 ml-2', children: [
+            ...(lifetimeBE.models || []).filter(m => m.api_lifetime_cost != null).map(m => jsxs('div', {
+              className: 'flex items-center justify-between gap-2 tabular-nums',
+              children: [
+                jsx('span', { className: 'truncate text-(--ui-text-quaternary)', children: m.model }),
+                jsxs('span', { className: 'shrink-0 text-(--ui-text-secondary) text-right', children: [
+                  `$${m.api_lifetime_cost.toFixed(4)}`,
+                  m.api_lifetime_cost_cached != null ? jsx('div', {
+                    className: 'text-(--ui-text-quaternary) text-[0.625rem]',
+                    children: `with cache (${m.api_real_cache_pct != null ? m.api_real_cache_pct.toFixed(0) : '?'}%): $${m.api_lifetime_cost_cached.toFixed(4)}`
+                  }) : null
+                ]})
+              ]
+            }, 'lt-' + m.model))
+          ]}) : null,
           jsx('div', {
             className: 'text-(--ui-text-quaternary) text-[0.6875rem] mt-1',
             children: 'Estimated API cost of tokens already consumed on Ollama Cloud this window.'
@@ -664,6 +686,54 @@ function UsagePane({ ctx }) {
           jsx('div', { className: 'text-(--ui-text-quaternary) text-[0.625rem]', children: 'Ollama $/1M = 7-day plan price × observed quota fraction × normalized bar share ÷ estimated tokens. * cache discount not published.' })
         ]})
       }))
+    }
+
+    // ── Plan vs API with cache: same comparison, API priced at real cache rate ──
+    if (settings.cost_efficiency_cached && data.source === 'cookie') {
+      const cachedModels = (data.weekly_models || []).filter(
+        m => m.api_effective_per_1m_cached != null
+      )
+      if (cachedModels.length > 0) {
+        rows.push(jsx(Collapsible, {
+          title: SECTION_LABELS.cost_efficiency_cached,
+          defaultOpen: false,
+          children: jsxs('div', { className: 'space-y-1', children: [
+            jsx('div', {
+              className: 'text-(--ui-text-quaternary) text-xs',
+              children: `API side priced at your real provider cache rate · ${cachedModels.length} models with cache data`
+            }),
+            jsx('div', {
+              className: 'rounded border border-(--ui-stroke-secondary) overflow-hidden',
+              children: cachedModels.map(m => {
+                const inP = m.api_input_per_1m != null ? `$${fmtPerMillion(m.api_input_per_1m)}` : '?'
+                const cacheP = m.api_cache_per_1m != null ? `$${fmtPerMillion(m.api_cache_per_1m)}` : 'n/a'
+                const cacheN = m.api_cache_price_published ? '' : '*'
+                const outP = m.api_output_per_1m != null ? `$${fmtPerMillion(m.api_output_per_1m)}` : '?'
+                const ollamaP = m.plan_effective_per_1m != null ? `$${fmtPerMillion(m.plan_effective_per_1m)}` : 'n/a'
+                const pct = m.plan_pct_of_api_cached != null ? `${m.plan_pct_of_api_cached.toFixed(0)}%` : 'n/a'
+                const realRate = m.api_real_cache_pct != null ? `${m.api_real_cache_pct.toFixed(0)}%` : '?'
+                return jsxs('div', {
+                  className: 'px-2 py-1.5 border-b last:border-b-0 border-(--ui-stroke-secondary) tabular-nums',
+                  children: [
+                    jsxs('div', {
+                      className: 'flex items-center justify-between gap-2',
+                      children: [
+                        jsx('span', { className: 'truncate text-(--ui-text-secondary)', children: m.model }),
+                        jsxs('span', { className: 'shrink-0 text-(--ui-text-secondary)', children: [
+                          'Ollama ', ollamaP, ' · API (', realRate, ' cache) $', fmtPerMillion(m.api_effective_per_1m_cached), ' · ',
+                          jsx('b', { className: m.plan_pct_of_api_cached != null && m.plan_pct_of_api_cached < 20 ? 'text-(--ui-badge-success)' : '', children: pct })
+                        ]})
+                      ]
+                    }),
+                    jsx('div', { className: 'text-right text-(--ui-text-quaternary) text-[0.625rem]', children: `API input/cache/output: ${inP} / ${cacheP}${cacheN} / ${outP}` })
+                  ]
+                }, m.model)
+              })
+            }),
+            jsx('div', { className: 'text-(--ui-text-quaternary) text-[0.625rem]', children: 'Same as Plan vs API, but the API $/1M is computed with prompt tokens split by your real provider cache rate (largest sample wins, OpenRouter fallback).' })
+          ]})
+        }))
+      }
     }
 
     // ── API usage percentage: just the Ollama/API ratio per model ──
