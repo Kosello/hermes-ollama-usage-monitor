@@ -32,6 +32,13 @@ _pydantic = types.ModuleType("pydantic")
 _pydantic.BaseModel = type("BaseModel", (), {})
 sys.modules["pydantic"] = _pydantic
 
+# plugin_api also imports pydantic for request bodies; parser tests don't
+# exercise those endpoints, so provide a minimal stub for CI environments
+# where pydantic is not installed.
+_pydantic = types.ModuleType("pydantic")
+_pydantic.BaseModel = object
+sys.modules["pydantic"] = _pydantic
+
 spec = importlib.util.spec_from_file_location("plugin_api", BACKEND)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
