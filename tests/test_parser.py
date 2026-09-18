@@ -222,16 +222,53 @@ def main() -> int:
 
 def test_deepseek_official_pricing() -> None:
     """The official DeepSeek-V4 peak/off-peak table must match the announcement."""
-    # Peak hours: 01:00–04:00 and 06:00–10:00 UTC.
+    # Peak hours: 01:00–04:00 and 06:00–10:00 UTC, Monday–Friday only.
     assert mod._DEEPSEEK_PEAK_WINDOWS == ((1, 4), (6, 10))
     assert mod._DEEPSEEK_OFFICIAL_PEAK == {
+        "deepseek-v4.1-flash": (0.006, 0.30, 1.20),
+        "deepseek-flash": (0.006, 0.30, 1.20),
         "deepseek-v4-flash": (0.014, 0.44, 1.32),
         "deepseek-v4-pro": (0.044, 1.32, 3.96),
     }
     assert mod._DEEPSEEK_OFFICIAL_OFFPEAK == {
+        "deepseek-v4.1-flash": (0.003, 0.15, 0.60),
+        "deepseek-flash": (0.003, 0.15, 0.60),
         "deepseek-v4-flash": (0.007, 0.22, 0.66),
         "deepseek-v4-pro": (0.022, 0.66, 1.98),
     }
+
+    # Weekends are off-peak all day: the weekday guard must be in place, or
+    # Saturday/Sunday peak hours get charged at 2× the real rate.
+    import datetime as _dt
+    real_now = mod.datetime
+
+    class _FrozenDatetime(_dt.datetime):
+        _frozen: _dt.datetime
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls._frozen if tz is None else cls._frozen.astimezone(tz)
+
+    def _peak_at(y, mo, d, h):
+        _FrozenDatetime._frozen = _dt.datetime(y, mo, d, h, tzinfo=_dt.timezone.utc)
+        mod.datetime = _FrozenDatetime
+        try:
+            return mod._is_deepseek_peak_now()
+        finally:
+            mod.datetime = real_now
+
+    try:
+        # 2026-09-19 is a Saturday, 2026-09-18 a Friday.
+        assert _peak_at(2026, 9, 19, 2) is False, "Saturday 02:00 UTC must be off-peak"
+        assert _peak_at(2026, 9, 19, 7) is False, "Saturday 07:00 UTC must be off-peak"
+        assert _peak_at(2026, 9, 20, 2) is False, "Sunday 02:00 UTC must be off-peak"
+        assert _peak_at(2026, 9, 18, 2) is True, "Friday 02:00 UTC is peak"
+        assert _peak_at(2026, 9, 18, 7) is True, "Friday 07:00 UTC is peak"
+        assert _peak_at(2026, 9, 18, 5) is False, "Friday 05:00 UTC is off-peak (between windows)"
+        assert _peak_at(2026, 9, 18, 12) is False, "Friday 12:00 UTC is off-peak"
+    finally:
+        mod.datetime = real_now
+
     # Returned tuple is (input=cache-miss, output, cached_input=cache-hit).
     real_peak_fn = mod._is_deepseek_peak_now
     real_ts = mod._DEEPSEEK_PRICING_EFFECTIVE_TS
@@ -240,9 +277,12 @@ def test_deepseek_official_pricing() -> None:
         mod._is_deepseek_peak_now = lambda: True
         assert mod._deepseek_official_price("deepseek-v4-pro") == (1.32, 3.96, 0.044)
         assert mod._deepseek_official_price("deepseek-v4-flash:0731") == (0.44, 1.32, 0.014)
+        assert mod._deepseek_official_price("deepseek-v4.1-flash") == (0.30, 1.20, 0.006)
         mod._is_deepseek_peak_now = lambda: False
         assert mod._deepseek_official_price("deepseek-v4-pro") == (0.66, 1.98, 0.022)
         assert mod._deepseek_official_price("deepseek-v4-flash") == (0.22, 0.66, 0.007)
+        assert mod._deepseek_official_price("deepseek-v4.1-flash") == (0.15, 0.60, 0.003)
+        assert mod._deepseek_official_price("deepseek-flash") == (0.15, 0.60, 0.003)
         # Non-DeepSeek models are untouched.
         assert mod._deepseek_official_price("glm-5.2") is None
     finally:

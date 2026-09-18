@@ -443,12 +443,19 @@ def _resolve_api_prices() -> tuple[dict, str]:
 
 
 _BUILTIN_PRICES = {
+    # USD per 1M tokens: input, output, cached input.
+    "deepseek-v4.1-flash": (0.15, 0.60, 0.003),
+    "deepseek-v4.1-flash:cloud": (0.15, 0.60, 0.003),
+    "deepseek-flash": (0.15, 0.60, 0.003),
+    "glm-5.3": (1.40, 4.40, 0.26),
+    "glm-5.3-flash": (0.15, 0.50, 0.03),
     "glm-5.2": (0.07, 0.22, 0.013),
     "glm-5.2:cloud": (0.07, 0.22, 0.013),
     "glm-5": (1.40, 4.40, 0.26),
     "deepseek-v4-flash:0731": (0.09, 0.18, 0.018),
     "deepseek-v4-flash": (0.14, 0.28, 0.028),
     "deepseek-v4-pro": (0.435, 0.87, 0.003625),
+    "kimi-k3": (3.00, 15.00, 0.30),
     "minimax-m3": (0.30, 1.20, 0.06),
     "gemma4:31b": (0.10, 0.34, 0.10),
     "kimi-k2.7-code": (0.70, 3.50, 0.15),
@@ -461,25 +468,35 @@ _BUILTIN_PRICES = {
 
 
 # ── Official DeepSeek-V4 API pricing (effective 2026-08-16 16:00 UTC) ──────
-# Peak hours: 01:00–04:00 and 06:00–10:00 UTC; all other hours are off-peak.
+# Peak hours: 01:00–04:00 and 06:00–10:00 UTC, Monday–Friday; all other hours
+# (including all weekend) are off-peak.
 # USD per 1M tokens: input (cache hit), input (cache miss), output.
 _DEEPSEEK_OFFICIAL_PEAK = {
+    "deepseek-v4.1-flash": (0.006, 0.30, 1.20),
+    "deepseek-flash": (0.006, 0.30, 1.20),
     "deepseek-v4-flash": (0.014, 0.44, 1.32),
     "deepseek-v4-pro": (0.044, 1.32, 3.96),
 }
 _DEEPSEEK_OFFICIAL_OFFPEAK = {
+    "deepseek-v4.1-flash": (0.003, 0.15, 0.60),
+    "deepseek-flash": (0.003, 0.15, 0.60),
     "deepseek-v4-flash": (0.007, 0.22, 0.66),
     "deepseek-v4-pro": (0.022, 0.66, 1.98),
 }
-# Peak windows: (start_hour, end_hour) inclusive-exclusive, UTC.
+# Peak windows: (start_hour, end_hour) inclusive-exclusive, UTC, Monday–Friday.
 _DEEPSEEK_PEAK_WINDOWS = ((1, 4), (6, 10))
 _DEEPSEEK_PRICING_EFFECTIVE_TS = 1786896000  # 2026-08-16 16:00 UTC
 
 
 def _is_deepseek_peak_now() -> bool:
-    """True if the current UTC time falls in a DeepSeek peak window."""
-    hour = datetime.now(timezone.utc).hour
-    return any(start <= hour < end for start, end in _DEEPSEEK_PEAK_WINDOWS)
+    """True if the current UTC time falls in a DeepSeek peak window.
+
+    Peak runs Monday–Friday only — weekends are off-peak all day.
+    """
+    now = datetime.now(timezone.utc)
+    if now.weekday() >= 5:
+        return False
+    return any(start <= now.hour < end for start, end in _DEEPSEEK_PEAK_WINDOWS)
 
 
 def _deepseek_official_price(model: str) -> tuple | None:
