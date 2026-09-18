@@ -119,7 +119,12 @@ def _git(cmd: list[str], timeout: int = 15) -> str:
 
 
 def _check_for_update(force: bool = False) -> dict:
-    """Compare local HEAD with origin/main. Cached for UPDATE_CHECK_TTL."""
+    """Report whether origin/main has commits the local checkout lacks.
+
+    Only *behind* counts as an update: a local commit that is merely ahead of
+    (or diverged from) origin must not offer a pull, because ``--ff-only``
+    cannot apply it and the button would be a dead end.
+    """
     now = time.time()
     if not force and _update_state["result"] and (now - _update_state["ts"]) < UPDATE_CHECK_TTL:
         return _update_state["result"]
@@ -130,7 +135,9 @@ def _check_for_update(force: bool = False) -> dict:
         remote = _git(["rev-parse", "origin/main"])
         result["local"] = local[:7]
         result["remote"] = remote[:7]
-        result["update_available"] = local != remote
+        # Commits in origin/main that HEAD does not contain.
+        behind = int(_git(["rev-list", "--count", f"HEAD..{remote}"]) or 0)
+        result["update_available"] = behind > 0
     except Exception as e:
         result["ok"] = False
         result["error"] = str(e)
