@@ -296,17 +296,17 @@ function UsageChip({ ctx }) {
   const weekly = data?.weekly_used_pct
   const plan = data?.plan
 
-  let label = 'ollama: …'
+  let label = 'Ollama: …'
   if (data) {
     if (data.ok === false) {
-      label = 'ollama: n/a'
+      label = 'Ollama: n/a'
     } else {
-      const s = session != null ? `${Math.round(session)}%` : '?'
-      const w = weekly != null ? `${Math.round(weekly)}%` : '?'
-      label = `${stale ? '⚠ stale · ' : ''}${plan ? plan + ' ' : ''}S${s} W${w}`
+      const s = Number.isFinite(session) ? `${Math.round(session)}%` : 'n/a'
+      const w = Number.isFinite(weekly) ? `${Math.round(weekly)}%` : 'n/a'
+      label = `Ollama${plan ? ' ' + plan : ''} · S ${s} / W ${w}${stale ? ' ⚠' : ''}`
     }
   } else if (failed || !isLoading) {
-    label = 'ollama: n/a'
+    label = 'Ollama: n/a'
   }
 
   const tooltip = [
@@ -326,21 +326,19 @@ function UsageChip({ ctx }) {
     // Tip paints an inline background; nested flex/gap leaves transparent strips.
     label: jsx('span', { className: 'whitespace-pre-line text-xs', children: tooltip }),
     children: jsx('button', {
-      className: cn(
-        'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] transition-colors',
-        'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground disabled:opacity-50'
-      ),
+      style: {
+        height: '100%', padding: '0 6px', fontSize: '11px', whiteSpace: 'nowrap',
+        color: stale || failed || data?.ok === false
+          ? 'var(--ui-badge-warning)'
+          : data ? 'var(--ui-text-secondary)' : 'var(--ui-text-tertiary)'
+      },
       type: 'button',
       title: pending ? 'Refreshing Ollama Cloud usage…' : 'Ollama Cloud usage — click to refresh',
       disabled: pending,
       'aria-busy': pending,
+      'aria-label': `${label}, percentages used (session / weekly)`,
       onClick: () => forceRefresh(ctx, qc),
-      children: jsx('span', {
-        className: stale || failed || data?.ok === false
-          ? 'text-(--ui-badge-warning)'
-          : pctColor(Math.max(session ?? 0, weekly ?? 0)),
-        children: label
-      })
+      children: label
     })
   })
 }

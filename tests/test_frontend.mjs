@@ -306,7 +306,7 @@ for (const id of ['chip', 'pane', 'palette']) {
     assertWarning(h, failure.detail)
     assert.match(text(h.mount('pane').tree), /Usage API returned HTTP 503/)
     const chip = h.mount('chip').tree
-    assert.match(text(chip), /ollama: n\/a/)
+    assert.match(text(chip), /Ollama: n\/a/)
     assert.match(chip.props.label.props.children, /Usage API returned HTTP 503/)
   })
 
@@ -325,7 +325,7 @@ for (const id of ['chip', 'pane', 'palette']) {
     assertWarning(h, 'Could not reach the Ollama usage backend')
     assert.doesNotMatch(JSON.stringify(h.notifications), /sensitive-transport/)
     assert.doesNotMatch(text(h.mount('pane').tree), /sensitive-transport/)
-    assert.match(text(h.mount('chip').tree), /stale/)
+    assert.match(text(h.mount('chip').tree), /⚠/)
   })
 }
 
@@ -388,8 +388,8 @@ for (const [label, state, snapshot] of [
     h.seed(snapshot)
     h.setQueryState(state)
     const chip = h.mount('chip').tree
-    assert.match(text(chip), /⚠ stale/)
-    assert.match(text(chip), /S12% W35%/)
+    assert.match(text(chip), /⚠$/)
+    assert.match(text(chip), /S 12% \/ W 35%/)
     const labelNode = chip.props.label
     assert.equal(labelNode.type, 'span')
     assert.equal(typeof labelNode.props.children, 'string', 'Exactly one flat text child')
@@ -409,6 +409,26 @@ for (const [label, state, snapshot] of [
   })
 }
 
+test('status chip matches Codex typography, spacing, colors and compact label layout', () => {
+  const h = harness()
+  h.seed(FRESH)
+  const chip = h.mount('chip').tree
+  const control = nodes(chip, node => node.type === 'button')[0]
+  assert.equal(text(control), 'Ollama Pro · S 12% / W 35%')
+  assert.deepEqual(clean(control.props.style), {
+    height: '100%', padding: '0 6px', fontSize: '11px', whiteSpace: 'nowrap',
+    color: 'var(--ui-text-secondary)'
+  })
+  assert.equal(typeof control.props.children, 'string')
+  assert.match(control.props['aria-label'], /percentages used \(session \/ weekly\)/)
+  h.seed({ ...FRESH, stale: true })
+  const staleControl = nodes(h.mount('chip').tree, node => node.type === 'button')[0]
+  assert.equal(text(staleControl), 'Ollama Pro · S 12% / W 35% ⚠')
+  assert.equal(staleControl.props.style.color, 'var(--ui-badge-warning)')
+  h.seed({ ...FRESH, plan: null, session_used_pct: null, weekly_used_pct: null })
+  assert.equal(text(h.mount('chip').tree), 'Ollama · S n/a / W n/a')
+})
+
 test('fresh/cached tooltip reports the original fetched timestamp without a stale warning', () => {
   const h = harness()
   for (const cached of [false, true]) {
@@ -425,7 +445,7 @@ test('connection failure without data renders unavailable rather than an endless
   const h = harness()
   h.setQueryState({ isLoading: false, isError: true, error: new Error('private-error') })
   const chip = h.mount('chip').tree
-  assert.match(text(chip), /ollama: n\/a/)
+  assert.match(text(chip), /Ollama: n\/a/)
   assert.match(chip.props.label.props.children, /Freshness: unavailable/)
   assert.match(chip.props.label.props.children, /Fetched: unknown/)
   assert.match(text(h.mount('pane').tree), /Could not reach the Ollama usage backend/)
