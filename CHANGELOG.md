@@ -4,6 +4,21 @@ All notable changes to **Ollama Usage Monitor** (Hermes plugin).
 
 The format follows [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0]
+
+### Fixed
+- Reject malformed API limits, invalid/nonfinite fractions, boolean numbers and invalid model request counts before caching or writing history; missing data no longer appears as 0%.
+- Resolve credential files, plans, prices, accounting, histories and reports per active Hermes profile. Separate in-memory usage/price caches and named-profile Keychain identities.
+- Apply manual plan selection consistently to cookie data and API fallback economics; report the actual plan source.
+- Preserve original acquisition timestamps on cache hits and retain last-good readings with explicit stale/error status when refresh fails.
+- Chip, pane and command-palette refresh now share a real cache-bypass request, update the usage cache and invalidate history/lifetime summaries. Transport errors mark retained UI data stale.
+- Correct Desktop restart instructions and primary/fallback source descriptions.
+- Profile-scope the optional cron helpers, validate their quota readings, and stop the watchdog from truncating lifetime history or replacing rich per-model records with empty snapshots.
+
+### Added
+- Offline backend, cron and Desktop handler regression coverage in CI, with temporary profile storage and no real credentials.
+- Root unified-package manifest and API entry so `hermes plugins install` can discover the repository; the split `backend/` layout remains compatible with manual installs.
+
 ## [1.4.0] — 2026-09-18
 
 ### Fixed

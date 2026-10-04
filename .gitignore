@@ -6,3 +6,13 @@ ollama-usage-price-cache.json
 ollama-usage-prices.json
 ollama_api_key.txt
 ollama-usage-plan.txt
+.venv/
+.env
+.env.*
+auth.json
+state.db*
+ollama-usage-history.jsonl
+ollama-usage-sessions.jsonl
+ollama-alert-state.json
+ollama-usage-report.md
+ollama-usage-reports/

@@ -12,6 +12,7 @@ STDOUT CONTRACT: empty when nothing to report (silent tick), a short
 alert line when a threshold just crossed. Non-zero exit = error alert.
 """
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -20,10 +21,27 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-PLUGIN_DIR = Path.home() / ".hermes" / "plugins" / "ollama-usage-monitor"
-HISTORY_FILE = Path.home() / ".hermes" / "ollama-usage-history.jsonl"
-STATE_FILE = Path.home() / ".hermes" / "ollama-alert-state.json"
-COOKIE_FILE = Path.home() / ".hermes" / "ollama_cookie.txt"
+try:
+    from hermes_constants import get_hermes_home
+except ImportError:
+    def get_hermes_home():
+        return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser()
+
+
+def _keychain_account():
+    explicit = os.environ.get("OLLAMA_KEYCHAIN_ACCOUNT", "").strip()
+    if explicit:
+        return explicit
+    home = Path(get_hermes_home()).expanduser().resolve()
+    if home == (Path.home() / ".hermes").resolve():
+        return "ollama"
+    return "ollama-" + hashlib.sha256(str(home).encode()).hexdigest()[:16]
+
+
+PLUGIN_DIR = get_hermes_home() / "plugins" / "ollama-usage-monitor"
+HISTORY_FILE = get_hermes_home() / "ollama-usage-history.jsonl"
+STATE_FILE = get_hermes_home() / "ollama-alert-state.json"
+COOKIE_FILE = get_hermes_home() / "ollama_cookie.txt"
 SETTINGS_URL = "https://ollama.com/settings"
 TIMEOUT = 15
 
@@ -32,11 +50,16 @@ CRIT_PCT = 90.0
 
 
 def _load_cookie() -> str:
+    if os.environ.get("OLLAMA_COOKIE_SOURCE", "auto").lower() == "file":
+        cookie = COOKIE_FILE.read_text().strip()
+        if not cookie:
+            raise ValueError("Cookie file is empty")
+        return cookie
     # Keychain first, then file — same order as the plugin backend.
     try:
         out = subprocess.run(
             ["security", "find-generic-password", "-s", "hermes-ollama-cookie",
-             "-a", "ollama", "-w"],
+             "-a", _keychain_account(), "-w"],
             capture_output=True, text=True, timeout=10,
         )
         if out.returncode == 0 and out.stdout.strip():
@@ -68,7 +91,10 @@ def _fetch_weekly_pct() -> float:
     weekly = re.search(r"Weekly usage\s+([0-9.]+)%", html)
     if not weekly:
         raise ValueError("Could not parse weekly usage from settings page")
-    return float(weekly.group(1))
+    value = float(weekly.group(1))
+    if not 0 <= value <= 100:
+        raise ValueError("Invalid weekly usage percentage")
+    return value
 
 
 def _record_history(weekly_pct: float) -> None:
@@ -88,6 +114,9 @@ def _record_history(weekly_pct: float) -> None:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if rec.get("week") == week and rec.get("models"):
+                    # This minimal cron snapshot must not replace rich backend data.
+                    return
                 if rec.get("week") != week:
                     kept.append(line)
         record = {
@@ -102,9 +131,7 @@ def _record_history(weekly_pct: float) -> None:
         }
         kept.append(json.dumps(record))
         HISTORY_FILE.write_text("\n".join(kept) + "\n")
-        lines = HISTORY_FILE.read_text().splitlines()
-        if len(lines) > 8:
-            HISTORY_FILE.write_text("\n".join(lines[-8:]) + "\n")
+        # Full history is the lifetime source. Limit display, never storage.
     except OSError:
         pass  # history is best-effort
 

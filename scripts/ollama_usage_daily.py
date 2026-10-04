@@ -5,6 +5,8 @@ Ollama Cloud daily usage line — prints ONE short summary line (no_agent cron).
 Reuses the watchdog's fetch logic. Output is delivered verbatim to the chat.
 """
 import json
+import hashlib
+import os
 import re
 import subprocess
 import sys
@@ -12,17 +14,39 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-COOKIE_FILE = Path.home() / ".hermes" / "ollama_cookie.txt"
-HISTORY_FILE = Path.home() / ".hermes" / "ollama-usage-history.jsonl"
+try:
+    from hermes_constants import get_hermes_home
+except ImportError:
+    def get_hermes_home():
+        return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser()
+
+
+def _keychain_account():
+    explicit = os.environ.get("OLLAMA_KEYCHAIN_ACCOUNT", "").strip()
+    if explicit:
+        return explicit
+    home = Path(get_hermes_home()).expanduser().resolve()
+    if home == (Path.home() / ".hermes").resolve():
+        return "ollama"
+    return "ollama-" + hashlib.sha256(str(home).encode()).hexdigest()[:16]
+
+
+COOKIE_FILE = get_hermes_home() / "ollama_cookie.txt"
+HISTORY_FILE = get_hermes_home() / "ollama-usage-history.jsonl"
 SETTINGS_URL = "https://ollama.com/settings"
 TIMEOUT = 15
 
 
 def _load_cookie() -> str:
+    if os.environ.get("OLLAMA_COOKIE_SOURCE", "auto").lower() == "file":
+        cookie = COOKIE_FILE.read_text().strip()
+        if not cookie:
+            raise ValueError("Cookie file is empty")
+        return cookie
     try:
         out = subprocess.run(
             ["security", "find-generic-password", "-s", "hermes-ollama-cookie",
-             "-a", "ollama", "-w"],
+             "-a", _keychain_account(), "-w"],
             capture_output=True, text=True, timeout=10,
         )
         if out.returncode == 0 and out.stdout.strip():
@@ -57,6 +81,8 @@ def main() -> int:
 
     w = float(weekly.group(1))
     s = float(session.group(1)) if session else None
+    if not 0 <= w <= 100 or (s is not None and not 0 <= s <= 100):
+        raise ValueError("Invalid usage percentage")
 
     # Top model from the latest history record (best effort)
     top = None

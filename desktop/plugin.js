@@ -2,11 +2,11 @@
  * Ollama Cloud Usage — Hermes desktop plugin.
  *
  * Shows Ollama Cloud session/weekly usage in a statusbar chip and a pane.
- * Data comes from the official Ollama usage API through the plugin backend;
- * settings-page scraping is only a fallback.
+ * Cookie-backed settings data provides per-model quota weights; the official
+ * usage API is the limited fallback. Credentials stay in the plugin backend.
  */
 
-import { cn, haptic, host, PALETTE_AREA, Tip, useQuery, useQueryClient } from '@hermes/plugin-sdk'
+import { atom, cn, haptic, host, PALETTE_AREA, queryClient, Tip, useQuery, useQueryClient, useValue } from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
@@ -48,36 +48,145 @@ function normalizeSettings(value) {
   return { ...DEFAULT_SETTINGS, ...value, _version: SETTINGS_VERSION }
 }
 
-// ── data hooks ────────────────────────────────────────────────────────────
+// ── data hooks and shared refresh ─────────────────────────────────────────
+const REFRESH_TIMEOUT_MS = 90000
+const CONNECTION_ERROR = 'Could not reach the Ollama usage backend. Check the connection and try again.'
+const refreshes = new Map()
+const pendingRefreshes = atom(new Set())
+
+function queryKey(scope, name) {
+  return [...scope, name]
+}
+
+function currentScope(ctx) {
+  return [ctx.source, host.state.profile.get(), (host.state.connectionId || host.state.profile).get()]
+}
+
+function useQueryScope(ctx) {
+  const profile = useValue(host.state.profile)
+  const connection = useValue(host.state.connectionId || host.state.profile)
+  return [ctx.source, profile, connection]
+}
+
+function scopedRest(ctx, scope, path, options) {
+  // React Query may retry/invalidate an old owner after the user has switched.
+  // The SDK REST door is ambient: never fetch the new owner into an old key.
+  if (JSON.stringify(scope) !== JSON.stringify(currentScope(ctx))) {
+    return Promise.reject(new Error('Ollama usage owner changed'))
+  }
+  return ctx.rest(path, options)
+}
+
+function useRefreshPending(ctx) {
+  const scope = useQueryScope(ctx)
+  const pending = useValue(pendingRefreshes)
+  return pending.has(JSON.stringify(scope))
+}
+
+function usageError(data) {
+  // `detail` is sanitized by the backend; never display transport exceptions.
+  if (typeof data?.detail === 'string' && data.detail.trim()) return data.detail
+  if (data?.error === 'cookie_not_configured') {
+    return 'Cookie not configured — add __Secure-session to ~/.hermes/ollama_cookie.txt'
+  }
+  return 'Could not fetch fresh Ollama usage. Check the usage source and try again.'
+}
+
+function usageIsStale(data, failed) {
+  return data?.ok === true && Boolean(data.stale || failed)
+}
+
+function freshnessText(data, failed) {
+  if (!data || data.ok !== true) return 'Freshness: unavailable'
+  if (usageIsStale(data, failed)) return 'Freshness: stale — showing the last successful snapshot'
+  return data.cached ? 'Freshness: cached snapshot' : 'Freshness: latest successful snapshot'
+}
+
+// All entrypoints share one request, cache update, notification and pending state.
+// Capture the owner at click time: a later profile switch must not move the result.
+function forceRefresh(ctx, qc = queryClient) {
+  const scope = currentScope(ctx)
+  const owner = JSON.stringify(scope)
+  if (refreshes.has(owner)) return refreshes.get(owner)
+
+  haptic('tap')
+  pendingRefreshes.set(new Set([...pendingRefreshes.get(), owner]))
+  const usageKey = queryKey(scope, 'usage')
+  const task = (async () => {
+    let response
+    try {
+      // Cancel polling before it can overwrite the forced result. Start REST
+      // synchronously so the SDK binds the same active owner as the cache key.
+      const [, result] = await Promise.all([
+        qc.cancelQueries({ queryKey: usageKey, exact: true }),
+        ctx.rest('/usage/refresh', { method: 'GET', timeoutMs: REFRESH_TIMEOUT_MS })
+      ])
+      response = result
+    } catch {
+      response = { ok: false, error: 'fetch_failed', detail: CONNECTION_ERROR }
+    }
+
+    const success = response?.ok === true && !response.stale
+    const detail = success ? null : usageError(response)
+    qc.setQueryData(usageKey, previous => {
+      if (response?.ok === true) return response
+      // A transport/empty failure must not erase an already useful snapshot.
+      if (previous?.ok === true) return { ...previous, stale: true, error: 'fetch_failed', detail }
+      return response || { ok: false, error: 'fetch_failed', detail }
+    })
+    if (success) {
+      await Promise.allSettled(['history', 'lifetime', 'lifetime-break-even'].map(name =>
+        qc.invalidateQueries({ queryKey: queryKey(scope, name), exact: true })
+      ))
+    }
+    host.notify({
+      kind: success ? 'info' : 'warning',
+      message: success ? 'Ollama usage refreshed' : `Ollama usage refresh failed: ${detail}`
+    })
+    return response
+  })().finally(() => {
+    refreshes.delete(owner)
+    const pending = new Set(pendingRefreshes.get())
+    pending.delete(owner)
+    pendingRefreshes.set(pending)
+  })
+  refreshes.set(owner, task)
+  return task
+}
+
 function useUsage(ctx) {
+  const scope = useQueryScope(ctx)
   return useQuery({
-    queryKey: [ctx.source, 'usage'],
-    queryFn: () => ctx.rest('/usage'),
+    queryKey: queryKey(scope, 'usage'),
+    queryFn: () => scopedRest(ctx, scope, '/usage', { timeoutMs: REFRESH_TIMEOUT_MS }),
     refetchInterval: REFRESH_MS,
     staleTime: 30000,
     retry: 1
   })
 }
 function useHistory(ctx) {
+  const scope = useQueryScope(ctx)
   return useQuery({
-    queryKey: [ctx.source, 'history'],
-    queryFn: () => ctx.rest('/usage/history'),
+    queryKey: queryKey(scope, 'history'),
+    queryFn: () => scopedRest(ctx, scope, '/usage/history'),
     staleTime: 300000,
     retry: 1
   })
 }
 function useLifetime(ctx) {
+  const scope = useQueryScope(ctx)
   return useQuery({
-    queryKey: [ctx.source, 'lifetime'],
-    queryFn: () => ctx.rest('/usage/lifetime'),
+    queryKey: queryKey(scope, 'lifetime'),
+    queryFn: () => scopedRest(ctx, scope, '/usage/lifetime'),
     staleTime: 300000,
     retry: 1
   })
 }
 function useLifetimeBreakEven(ctx) {
+  const scope = useQueryScope(ctx)
   return useQuery({
-    queryKey: [ctx.source, 'lifetime-break-even'],
-    queryFn: () => ctx.rest('/usage/lifetime-break-even'),
+    queryKey: queryKey(scope, 'lifetime-break-even'),
+    queryFn: () => scopedRest(ctx, scope, '/usage/lifetime-break-even'),
     staleTime: 300000,
     retry: 1
   })
@@ -178,61 +287,71 @@ function Toggle({ label, checked, onChange }) {
 
 // ── statusbar chip ────────────────────────────────────────────────────────
 function UsageChip({ ctx }) {
-  const { data, isLoading } = useUsage(ctx)
+  const { data, isLoading, isError, error } = useUsage(ctx)
+  const qc = useQueryClient()
+  const pending = useRefreshPending(ctx)
+  const failed = Boolean(isError || error)
+  const stale = usageIsStale(data, failed)
   const session = data?.session_used_pct
   const weekly = data?.weekly_used_pct
   const plan = data?.plan
 
   let label = 'ollama: …'
-  if (!isLoading && data) {
+  if (data) {
     if (data.ok === false) {
       label = 'ollama: n/a'
     } else {
       const s = session != null ? `${Math.round(session)}%` : '?'
       const w = weekly != null ? `${Math.round(weekly)}%` : '?'
-      label = `${plan ? plan + ' ' : ''}S${s} W${w}`
+      label = `${stale ? '⚠ stale · ' : ''}${plan ? plan + ' ' : ''}S${s} W${w}`
     }
+  } else if (failed || !isLoading) {
+    label = 'ollama: n/a'
   }
 
+  const tooltip = [
+    'Ollama Cloud',
+    freshnessText(data, failed),
+    `Fetched: ${data?.fetched_at || 'unknown'}`,
+    pending ? 'Refreshing…' : null,
+    stale || data?.ok === false || failed
+      ? (failed ? CONNECTION_ERROR : usageError(data))
+      : null,
+    data?.reset_unavailable ? 'Reset timestamps are not exposed by the usage API' : null,
+    data?.session_reset ? `Session resets ${data.session_reset}` : null,
+    data?.weekly_reset ? `Weekly resets ${data.weekly_reset}` : null
+  ].filter(Boolean).join('\n')
+
   return jsx(Tip, {
-    label: jsxs('div', {
-      className: 'flex flex-col gap-1 p-1 text-xs',
-      children: [
-        jsx('div', { className: 'font-medium', children: 'Ollama Cloud' }),
-        data?.ok === false
-          ? jsx('div', {
-              className: 'text-(--ui-text-secondary)',
-              children: data.error === 'cookie_not_configured'
-                ? 'Cookie not configured — add __Secure-session to ~/.hermes/ollama_cookie.txt'
-                : `Unavailable: ${data.error}`
-            })
-          : jsx('div', {
-              className: 'whitespace-pre-line text-(--ui-text-quaternary)',
-              children: data?.reset_unavailable
-                ? 'Reset timestamps are not exposed by the usage API'
-                : [data?.session_reset ? `Session resets ${data.session_reset}` : null,
-                   data?.weekly_reset ? `Weekly resets ${data.weekly_reset}` : null]
-                    .filter(Boolean)
-                    .join('\n')
-            })
-      ]
-    }),
+    // Tip paints an inline background; nested flex/gap leaves transparent strips.
+    label: jsx('span', { className: 'whitespace-pre-line text-xs', children: tooltip }),
     children: jsx('button', {
       className: cn(
         'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] transition-colors',
-        'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
+        'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground disabled:opacity-50'
       ),
       type: 'button',
-      title: 'Ollama Cloud usage — click to refresh',
-      onClick: () => { haptic('tap'); host.notify({ kind: 'info', message: label }) },
-      children: jsx('span', { className: pctColor(Math.max(session ?? 0, weekly ?? 0)), children: label })
+      title: pending ? 'Refreshing Ollama Cloud usage…' : 'Ollama Cloud usage — click to refresh',
+      disabled: pending,
+      'aria-busy': pending,
+      onClick: () => forceRefresh(ctx, qc),
+      children: jsx('span', {
+        className: stale || failed || data?.ok === false
+          ? 'text-(--ui-badge-warning)'
+          : pctColor(Math.max(session ?? 0, weekly ?? 0)),
+        children: label
+      })
     })
   })
 }
 
 // ── pane ──────────────────────────────────────────────────────────────────
 function UsagePane({ ctx }) {
-  const { data, isLoading, refetch } = useUsage(ctx)
+  const scope = useQueryScope(ctx)
+  const { data, isLoading, isError, error } = useUsage(ctx)
+  const pending = useRefreshPending(ctx)
+  const failed = Boolean(isError || error)
+  const stale = usageIsStale(data, failed)
   const { data: hist } = useHistory(ctx)
   const { data: lifetime } = useLifetime(ctx)
   const { data: lifetimeBE } = useLifetimeBreakEven(ctx)
@@ -244,9 +363,11 @@ function UsagePane({ ctx }) {
   const [showSettings, setShowSettings] = useState(false)
   const [planOverride, setPlanOverride] = useState(null)
 
-  // Load on mount — ctx.storage may not exist, use localStorage fallback
+  // Reload owner-specific metadata on profile/connection changes; ignore late replies.
   useEffect(() => {
     let done = false
+    setReports(null)
+    setPlanOverride(null)
     const loadSettings = () => {
       try {
         const raw = localStorage.getItem('ollama-usage-settings')
@@ -269,15 +390,15 @@ function UsagePane({ ctx }) {
       setSettings(loadSettings())
     }
     // Also load reports
-    ctx.rest('/usage/report').then(r => {
-      if (r?.ok) setReports(r)
+    scopedRest(ctx, scope, '/usage/report').then(r => {
+      if (!done && r?.ok) setReports(r)
     }).catch(() => {})
     // Load current plan
-    ctx.rest('/usage/plan').then(r => {
-      if (r?.ok) setPlanOverride(r.plan)
+    scopedRest(ctx, scope, '/usage/plan').then(r => {
+      if (!done && r?.ok) setPlanOverride(r.plan)
     }).catch(() => {})
     return () => { done = true }
-  }, [])
+  }, [scope[1], scope[2]])
 
   const saveSettings = next => {
     const normalized = { ...next, _version: SETTINGS_VERSION }
@@ -299,11 +420,7 @@ function UsagePane({ ctx }) {
     })
   }
 
-  const refresh = () => {
-    haptic('tap')
-    qc.invalidateQueries({ queryKey: [ctx.source, 'usage'] })
-    refetch()
-  }
+  const refresh = () => forceRefresh(ctx, qc)
 
   if (!settings) return jsx('div', { className: 'p-3 text-(--ui-text-quaternary)', children: 'Loading…' })
 
@@ -379,12 +496,12 @@ function UsagePane({ ctx }) {
     }))
   }
 
-  if (isLoading) {
+  if (isLoading && !data) {
     rows.push(jsx('div', { className: 'text-(--ui-text-quaternary)', children: 'Loading…' }))
   } else if (!data || data.ok === false) {
-    const msg = data?.error === 'cookie_not_configured'
+    const msg = failed ? CONNECTION_ERROR : data?.detail || (data?.error === 'cookie_not_configured'
       ? 'Cookie not configured.\n\nRun:\n  echo \'__Secure-session=<value>\' > ~/.hermes/ollama_cookie.txt'
-      : `Unavailable: ${data?.error || 'no data'}`
+      : usageError(data))
     rows.push(jsx('div', {
       className: 'whitespace-pre-wrap text-(--ui-text-secondary) text-xs',
       children: msg
@@ -408,6 +525,14 @@ function UsagePane({ ctx }) {
         })
       ]
     }))
+
+    if (stale) {
+      rows.push(jsx('div', {
+        role: 'status',
+        className: 'whitespace-pre-line text-xs text-(--ui-badge-warning)',
+        children: `Stale — showing the last successful snapshot\nFetched: ${data.fetched_at || 'unknown'}\n${failed ? CONNECTION_ERROR : usageError(data)}`
+      }))
+    }
 
     // ── subscription vs API headline ──
     if (settings.savings && apiComparisonTotal != null) {
@@ -979,11 +1104,13 @@ function UsagePane({ ctx }) {
       jsx('button', {
         className: cn(
           'rounded-md border px-2 py-1 text-xs',
-          'border-(--ui-stroke-secondary) text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)'
+          'border-(--ui-stroke-secondary) text-(--ui-text-secondary) hover:bg-(--chrome-action-hover) disabled:opacity-50'
         ),
         type: 'button',
+        disabled: pending,
+        'aria-busy': pending,
         onClick: refresh,
-        children: 'Refresh'
+        children: pending ? 'Refreshing…' : 'Refresh'
       }),
       jsx('button', {
         className: cn(
@@ -1028,7 +1155,7 @@ export default {
         id: 'ollama-usage.refresh',
         label: 'Refresh Ollama Cloud usage',
         keywords: ['ollama', 'usage', 'quota'],
-        run: () => { haptic('tap'); host.notify({ kind: 'info', message: 'Ollama usage refreshed (check the pane)' }) }
+        run: () => forceRefresh(ctx)
       }
     })
   }

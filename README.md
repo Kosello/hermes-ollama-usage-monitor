@@ -18,7 +18,7 @@ Live Ollama Cloud usage in Hermes Agent — session & weekly quotas, per-model r
 hermes plugins install Kosello/hermes-ollama-usage-monitor
 ```
 
-Then add the desktop plugin (`desktop/plugin.js` → `~/.hermes/desktop-plugins/ollama-usage-monitor/`), set up the cookie (see [Install](#install)), restart the gateway, and reload desktop plugins (⌘K).
+The repository now includes a unified-package manifest, Desktop module and API entry point for current Hermes installers. Enable the plugin if prompted, set up the cookie or API fallback (see [Install](#install)), and **fully quit and relaunch Hermes Desktop** to mount the Python backend routes. JavaScript-only updates can use ⌘K → Reload desktop plugins. The split backend/Desktop layout below remains available for manual installs.
 
 ## What it shows
 
@@ -35,7 +35,8 @@ Then add the desktop plugin (`desktop/plugin.js` → `~/.hermes/desktop-plugins/
   - **Weekly history** — last 8 weeks of usage snapshots with trend arrow (↑/↓/→)
 - **Threshold alerts** — macOS notification when weekly usage crosses 75% (warning) / 90% (critical), once per threshold per week
 - **Daily usage line** — one short summary in chat every morning (`📊 Ollama Cloud: weekly 44.7% · session 81.6% · top: glm-5.2`)
-- Auto-refreshes every 60s (manual refresh button + ⌘K palette command)
+- Auto-refreshes every 60s; chip click, pane refresh, and the ⌘K command all bypass the backend cache.
+- Freshness is explicit: last successful fetch time is preserved, and failed requests visibly mark retained readings stale. Invalid payloads never become a fabricated 0% or enter history.
 
 ## Why
 
@@ -47,7 +48,8 @@ The authenticated settings page is the primary source because its per-model bar 
 
 ```bash
 mkdir -p ~/.hermes/plugins/ollama-usage-monitor
-cp -r backend/* ~/.hermes/plugins/ollama-usage-monitor/
+cp plugin.yaml ~/.hermes/plugins/ollama-usage-monitor/
+cp -r backend dashboard desktop ~/.hermes/plugins/ollama-usage-monitor/
 hermes plugins enable ollama-usage-monitor
 ```
 
@@ -87,7 +89,7 @@ The API doesn't expose your plan tier (Pro/Free/Max), which affects budget calcu
   ```
 - **Environment variable:** `export OLLAMA_PLAN=pro`
 
-If none are set, the plugin tries to scrape the plan from the cookie. If that also fails, it defaults to Pro ($20/mo).
+Precedence is **config file → environment → scraped plan → Pro default**, consistently for both cookie and API data. A manually selected tier overrides the scraped tier before economics are calculated.
 
 ### 5. API key (fallback)
 
@@ -102,18 +104,15 @@ The API fallback preserves aggregate usage percentages and request counts. It ca
 
 ### 6. Restart
 
-```bash
-hermes gateway restart
-```
+**Fully quit and relaunch Hermes Desktop** (⌘Q, not just close the window) after installing or changing the Python backend. `hermes gateway restart` does not reload Desktop's API server. For JavaScript-only changes, use **⌘K → Reload desktop plugins** if the file watcher does not pick them up. Current builds manage enable/disable decisions under **Capabilities → Plugins**; older builds may differ.
 
-Then in the desktop app: **⌘K → Reload desktop plugins**.
+### Profiles and privacy
 
-> **If the chip/pane don't appear after a gateway restart + reload**, fully
-> **quit and relaunch the Hermes app** (⌘Q, not just close the window).
-> Some plugin changes — especially to the desktop plugin JS or the backend
-> router — only take effect after a complete app restart, because the
-> gateway process and the desktop renderer cache module state separately
-> and a hot reload doesn't always clear both.
+The Python backend resolves files through Hermes's `get_hermes_home()` on each call, including request-local profile overrides. Cookie/API-key files, plan choices, accounting (`state.db`), prices, histories, reports, and memory caches are profile-isolated. The paths shown above assume the default profile; use your active `HERMES_HOME` for a named profile. Renderer quota caches are also scoped by profile and connection.
+
+The default macOS profile keeps the legacy Keychain account `ollama`. A named home uses `ollama-<first 16 hex characters of SHA-256 of its resolved home path>` under the same service. A profile-local cookie file is the simplest portable setup. Set `OLLAMA_KEYCHAIN_ACCOUNT` only when you **deliberately want a shared Keychain item**. Environment credentials (`OLLAMA_API_KEY`) and plan overrides (`OLLAMA_PLAN`) are explicit process-level configuration, not implicit credential copying. The optional one-shot cron helpers also honor their launch-time Hermes home and Keychain identity; they remain cookie-only and do not support the API fallback. The standalone tool is independent and is unchanged by this backend update.
+
+Tokens and cookies stay in the backend. Failure responses carry sanitized source/status messages, never raw exception URLs or authorization headers. This is not affiliated with Ollama or Nous Research.
 
 ### 7. Optional: alerts + daily line (cron)
 
@@ -194,7 +193,7 @@ Manual entries merge on top of automatic data; a partial override does not hide 
 - **Cookie scraping is brittle** — if Ollama changes its settings markup or the cookie expires, the tool falls back to `/api/usage`; per-model Ollama $/1M remains unavailable until the cookie is refreshed.
 - The cookie is a login token — keep it private (Keychain, or `chmod 600` on the file).
 - API-equivalent values are estimates based on historical token mix, not Ollama's current-window token telemetry. They explain pay-per-token economics; they do not explain Ollama's proprietary quota percentage exactly.
-- Works only in the Hermes **desktop** app (the backend loads via the gateway; the chip/pane need the desktop UI). The `/ollama` slash command from the [community plugin](https://github.com/3L0935/hermes-plugins) covers CLI/TUI. For non-Hermes users, see the **Standalone CLI** below.
+- Works only in the Hermes **desktop** app (the backend loads in the Desktop API server; the chip/pane need the desktop UI). The `/ollama` slash command from the [community plugin](https://github.com/3L0935/hermes-plugins) covers CLI/TUI. For non-Hermes users, see the **Standalone CLI** below.
 
 ## Standalone CLI (no Hermes needed)
 
@@ -246,14 +245,22 @@ History is written to `~/.ollama-cloud-history.jsonl` and sessions to `~/.ollama
 ## Development
 
 ```bash
-python tests/test_parser.py   # parser smoke test (no cookie needed — uses a saved HTML fixture)
+python -I tests/test_parser.py
+python -I tests/test_backend.py
+python -I tests/test_cron.py
+node --check desktop/plugin.js
+node tests/test_frontend.mjs
 ```
 
-CI (GitHub Actions) runs the smoke test + syntax checks on every push.
+CI runs the offline suites and syntax checks on every main-branch push and pull request. Backend/cron tests use temporary profiles; the Desktop harness mocks React and the SDK to exercise actual handlers, **not to prove visual activation**. Tests require Python 3.10+ and Node 20+, no credentials and no third-party Python dependencies.
 
 ## Files
 
 ```
+plugin.yaml                   # unified-package manifest for hermes plugins install
+dashboard/
+  manifest.json               # unified API manifest (same as backend copy)
+  plugin_api.py               # forwards to the authoritative backend source
 backend/
   plugin.yaml                 # Hermes plugin manifest
   dashboard/
@@ -267,7 +274,10 @@ scripts/
   ollama_usage_watch.py       # threshold watchdog (Hermes cron, silent unless crossed)
   ollama_usage_daily.py       # daily one-line usage summary (Hermes cron)
 tests/
-  test_parser.py              # parser smoke test
+  test_parser.py              # parser/pricing smoke test
+  test_backend.py             # validation, source fallback, profiles, freshness
+  test_cron.py                # cron storage safety and stdout contracts
+  test_frontend.mjs           # mocked SDK handler/state regressions
   fixtures/settings_page.html # saved page snapshot for CI
 ```
 

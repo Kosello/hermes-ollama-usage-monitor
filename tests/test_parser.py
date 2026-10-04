@@ -9,12 +9,17 @@ Loads a saved HTML fixture and asserts the parser extracts:
 """
 import importlib.util
 import json
+import os
 import sqlite3
 import sys
 import tempfile
 import types
 from pathlib import Path
 
+# Never read the real profile's plan, price overrides, credentials or accounting.
+_TEST_HOME = tempfile.TemporaryDirectory(prefix="ollama-parser-")
+os.environ["HERMES_HOME"] = _TEST_HOME.name
+os.environ.pop("OLLAMA_PLAN", None)
 HERE = Path(__file__).parent
 FIXTURE = HERE / "fixtures" / "settings_page.html"
 BACKEND = HERE.parent / "backend" / "dashboard" / "plugin_api.py"

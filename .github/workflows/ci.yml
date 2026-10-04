@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -20,13 +23,19 @@ jobs:
       - name: Python syntax check
         run: |
           python -m py_compile backend/dashboard/plugin_api.py
-          python -m py_compile tests/test_parser.py
+          python -m py_compile tests/test_parser.py dashboard/plugin_api.py scripts/ollama_usage_daily.py scripts/ollama_usage_watch.py
+          cmp plugin.yaml backend/plugin.yaml
+          cmp dashboard/manifest.json backend/dashboard/manifest.json
 
-      - name: Parser smoke test
-        run: python tests/test_parser.py
+      - name: Offline parser and backend tests
+        run: |
+          python -I tests/test_parser.py
+          python -I tests/test_backend.py
+          python -I tests/test_cron.py
 
       - name: Node syntax check
         uses: actions/setup-node@v4
         with:
           node-version: "20"
       - run: node --check desktop/plugin.js
+      - run: node --test tests/test_frontend.mjs

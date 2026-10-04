@@ -1,13 +1,13 @@
 """
 Ollama Cloud Usage — backend API routes for the desktop plugin.
 
-Mounted at /api/plugins/ollama-usage/ by the Hermes plugin backend.
+Mounted at /api/plugins/ollama-usage-monitor/ by the Hermes plugin backend.
 Scrapes ollama.com/settings with the session cookie (same approach as the
 community /ollama slash command, extended with per-model request counts
 and a small in-memory cache so the settings page is not hammered).
 
 Cookie storage (portable — works on any OS):
-  - macOS Keychain  (service 'hermes-ollama-cookie', account 'ollama')
+  - macOS Keychain  (service 'hermes-ollama-cookie', profile-scoped account)
   - or plain file   ~/.hermes/ollama_cookie.txt  (__Secure-session=<value>)
   Selection via env OLLAMA_COOKIE_SOURCE=auto|keychain|file (default: auto).
   'auto' = Keychain if a cookie is stored there, otherwise the file.
@@ -16,6 +16,9 @@ Cookie storage (portable — works on any OS):
 from __future__ import annotations
 
 import json
+import hashlib
+import math
+import urllib.error
 import logging
 import os
 import re
@@ -29,36 +32,68 @@ from pathlib import Path
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+try:
+    from hermes_constants import get_hermes_home
+except ImportError:  # Offline tests and direct module use without Hermes installed.
+    def get_hermes_home() -> Path:
+        return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser()
+
+
+def _profile_path(filename: str | Path) -> Path:
+    return Path(get_hermes_home()) / filename
+
+
+def _keychain_account() -> str:
+    """Keep the legacy default item; never share it implicitly with named homes."""
+    explicit = os.environ.get("OLLAMA_KEYCHAIN_ACCOUNT", "").strip()
+    if explicit:
+        return explicit
+    home = Path(get_hermes_home()).expanduser().resolve()
+    if home == (Path.home() / ".hermes").resolve():
+        return KEYCHAIN_ACCOUNT
+    suffix = hashlib.sha256(str(home).encode()).hexdigest()[:16]
+    return f"{KEYCHAIN_ACCOUNT}-{suffix}"
+
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-COOKIE_FILE = Path.home() / ".hermes" / "ollama_cookie.txt"
+COOKIE_FILE = "ollama_cookie.txt"
 KEYCHAIN_SERVICE = "hermes-ollama-cookie"
 KEYCHAIN_ACCOUNT = "ollama"
 SETTINGS_URL = "https://ollama.com/settings"
 API_USAGE_URL = "https://ollama.com/api/usage"
-API_KEY_FILE = Path.home() / ".hermes" / "ollama_api_key.txt"
-API_KEY_SOURCE = os.environ.get("OLLAMA_API_KEY_SOURCE", "file")
+API_KEY_FILE = "ollama_api_key.txt"
 TIMEOUT = 15
 CACHE_TTL_SECONDS = 60
-HISTORY_FILE = Path.home() / ".hermes" / "ollama-usage-history.jsonl"
+HISTORY_FILE = "ollama-usage-history.jsonl"
 HISTORY_MAX_WEEKS = 8
-SESSION_FILE = Path.home() / ".hermes" / "ollama-usage-sessions.jsonl"
-REPORT_FILE = Path.home() / ".hermes" / "ollama-usage-report.md"
-REPORTS_DIR = Path.home() / ".hermes" / "ollama-usage-reports"
+SESSION_FILE = "ollama-usage-sessions.jsonl"
+REPORT_FILE = "ollama-usage-report.md"
+REPORTS_DIR = "ollama-usage-reports"
 SESSION_LOG_CAP = 500
 
 # ── Price / token fallback chain ──────────────────────────────────────────
 # Priority: manual override file  →  live OpenRouter (24h cache)  →  builtin.
-PRICE_OVERRIDE_FILE = Path.home() / ".hermes" / "ollama-usage-prices.json"
-PRICE_CACHE_FILE = Path.home() / ".hermes" / "ollama-usage-price-cache.json"
-STATE_DB = Path.home() / ".hermes" / "state.db"
+PRICE_OVERRIDE_FILE = "ollama-usage-prices.json"
+PRICE_CACHE_FILE = "ollama-usage-price-cache.json"
+STATE_DB = "state.db"
 PRICE_CACHE_TTL_SECONDS = 24 * 3600
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
-_cache: dict = {"ts": 0, "data": None}
-_prices_cache: dict = {"ts": 0, "prices": None, "source": None}
+_usage_caches: dict = {}
+_price_caches: dict = {}
+
+
+def _cache_for_profile() -> dict:
+    key = str(Path(get_hermes_home()).expanduser().resolve())
+    return _usage_caches.setdefault(key, {"ts": 0, "data": None})
+
+
+def _prices_for_profile() -> dict:
+    key = str(Path(get_hermes_home()).expanduser().resolve())
+    return _price_caches.setdefault(key, {"ts": 0, "prices": None, "source": None})
 
 
 def _utc_now() -> datetime:
@@ -96,7 +131,7 @@ def _keychain_cookie() -> str | None:
     try:
         out = subprocess.run(
             ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE,
-             "-a", KEYCHAIN_ACCOUNT, "-w"],
+             "-a", _keychain_account(), "-w"],
             capture_output=True, text=True, timeout=10,
         )
         if out.returncode == 0 and out.stdout.strip():
@@ -112,12 +147,12 @@ def _keychain_store_cookie(cookie: str) -> bool:
         # Try delete-then-add so an expired cookie gets replaced.
         subprocess.run(
             ["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE,
-             "-a", KEYCHAIN_ACCOUNT],
+             "-a", _keychain_account()],
             capture_output=True, text=True, timeout=10,
         )
         add = subprocess.run(
             ["security", "add-generic-password", "-s", KEYCHAIN_SERVICE,
-             "-a", KEYCHAIN_ACCOUNT, "-w", cookie, "-U"],
+             "-a", _keychain_account(), "-w", cookie, "-U"],
             capture_output=True, text=True, timeout=10,
         )
         return add.returncode == 0
@@ -134,18 +169,18 @@ def _load_cookie() -> str:
             return kc
         if source == "keychain":
             raise FileNotFoundError(
-                f"No cookie in macOS Keychain ({KEYCHAIN_SERVICE}/{KEYCHAIN_ACCOUNT}).\n"
+                f"No cookie in macOS Keychain ({KEYCHAIN_SERVICE}/{_keychain_account()}).\n"
                 f"Store it with: security add-generic-password -s {KEYCHAIN_SERVICE} "
-                f"-a {KEYCHAIN_ACCOUNT} -w '<cookie>'"
+                f"-a {_keychain_account()} -w '<cookie>'"
             )
 
     if source in ("auto", "file"):
-        if not COOKIE_FILE.exists():
+        if not _profile_path(COOKIE_FILE).exists():
             raise FileNotFoundError(
-                f"Cookie file not found at {COOKIE_FILE}\n"
-                f"Run: echo '__Secure-session=<value>' > {COOKIE_FILE}"
+                f"Cookie file not found at {_profile_path(COOKIE_FILE)}\n"
+                f"Run: echo '__Secure-session=<value>' > {_profile_path(COOKIE_FILE)}"
             )
-        cookie = COOKIE_FILE.read_text().strip()
+        cookie = _profile_path(COOKIE_FILE).read_text().strip()
         if not cookie:
             raise ValueError("Cookie file is empty")
         return cookie
@@ -167,15 +202,15 @@ def _fetch_settings_page(cookie: str) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
-# ── Official API (primary source; cookie scrape is the fallback) ────────────
+# ── Official API (fallback; cookie page exposes per-model quota weights) ────────────
 
 def _load_api_key() -> str | None:
     """Read the official API key — env first, then the file."""
     env_key = os.environ.get("OLLAMA_API_KEY")
     if env_key:
         return env_key
-    if API_KEY_SOURCE == "file" and API_KEY_FILE.exists():
-        key = API_KEY_FILE.read_text().strip()
+    if os.environ.get("OLLAMA_API_KEY_SOURCE", "file") == "file" and _profile_path(API_KEY_FILE).exists():
+        key = _profile_path(API_KEY_FILE).read_text().strip()
         if key and not key.startswith("__Secure-session"):
             return key
     return None
@@ -191,70 +226,77 @@ def _fetch_usage_api(api_key: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-PLAN_FILE = Path.home() / ".hermes" / "ollama-usage-plan.txt"
+PLAN_FILE = "ollama-usage-plan.txt"
 VALID_PLANS = ("free", "pro", "max")
 PLAN_MONTHLY_USD = {"free": 0.0, "pro": 20.0, "max": 100.0}
 WEEKS_PER_MONTH = 365.2425 / 12 / 7  # calendar-average 4.348 weeks/month
 
 
-def _infer_plan() -> str | None:
-    """Resolve the Ollama Cloud plan tier.
-
-    1. config file ~/.hermes/ollama-usage-plan.txt (user's manual choice)
-    2. env OLLAMA_PLAN
-    3. cookie scrape of settings page (if cookie available)
-    4. None (caller defaults to Pro budget)
-    """
-    # 1. Manual config file — highest priority, works without cookie/browser.
+def _plan_choice(html: str | None = None, scraped_plan: str | None = None) -> tuple[str | None, str]:
+    """Manual file → environment → already-fetched page → default."""
     try:
-        if PLAN_FILE.exists():
-            val = PLAN_FILE.read_text().strip().lower()
+        if _profile_path(PLAN_FILE).exists():
+            val = _profile_path(PLAN_FILE).read_text().strip().lower()
             if val in VALID_PLANS:
-                return val.capitalize()
+                return val.capitalize(), "config file"
     except OSError:
         pass
-
-    # 2. Environment variable.
     env_plan = os.environ.get("OLLAMA_PLAN", "").strip().lower()
     if env_plan in VALID_PLANS:
-        return env_plan.capitalize()
-
-    # 3. Cookie scrape — only for the plan label.
-    try:
-        cookie = _load_cookie()
-        html = _fetch_settings_page(cookie)
-        m = re.search(r'Cloud usage</span>\s*\n?\s*<span[^>]*>\s*(pro|free|max)\s*<',
+        return env_plan.capitalize(), "environment"
+    if scraped_plan and scraped_plan.lower() in VALID_PLANS:
+        return scraped_plan.capitalize(), "settings page"
+    if html is None:
+        try:
+            html = _fetch_settings_page(_load_cookie())
+        except Exception:
+            html = ""
+    match = re.search(r'Cloud usage</span>\s*\n?\s*<span[^>]*>\s*(pro|free|max)\s*<',
                       html, re.IGNORECASE)
-        if m:
-            return m.group(1).capitalize()
-    except Exception:
-        pass
-
-    return None
+    if match:
+        return match.group(1).capitalize(), "settings page"
+    return None, "default (Pro)"
 
 
-def _api_to_usage(api_data: dict) -> dict:
+def _infer_plan(html: str | None = None, scraped_plan: str | None = None) -> str | None:
+    return _plan_choice(html, scraped_plan)[0]
+
+
+def _valid_usage(value, maximum: float) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and 0 <= value <= maximum and math.isfinite(value))
+
+
+def _api_to_usage(api_data: dict, html: str = "") -> dict:
     """Convert the official API response into the internal usage dict shape.
 
     The API gives us session/weekly usage as 0–1 floats and per-model request
     counts, but no plan tier, exact reset timestamps, or per-model quota usage.
-    We compute *request share* from request counts. Reset times are only rough
-    linear-use estimates; the UI labels them as estimates. Then both API and
-    cookie paths run the same cost enrichment.
+    We compute *request share* from request counts, never quota share. Reset
+    timestamps remain unavailable. Both paths run the same cost enrichment.
     """
-    limits = api_data.get("limits", {})
-    session = limits.get("session", {})
-    weekly = limits.get("weekly", {})
+    if not isinstance(api_data, dict) or not isinstance(api_data.get("limits"), dict):
+        raise ValueError("Invalid API limits payload")
+    limits = api_data["limits"]
+    session = limits.get("session")
+    weekly = limits.get("weekly")
+    if any(not isinstance(block, dict) or not _valid_usage(block.get("usage"), 1)
+           for block in (session, weekly)):
+        raise ValueError("Missing or invalid API usage fractions")
 
     def _models(block: dict) -> list:
-        models = [
-            {
-                "model": m.get("name", "?"),
-                "requests": m.get("request_count", 0),
-                "share_pct": None,
-            }
-            for m in block.get("models", [])
-        ]
+        raw_models = block.get("models", [])
+        if not isinstance(raw_models, list):
+            raise ValueError("Invalid API model list")
+        models = []
+        for model in raw_models:
+            if not isinstance(model, dict):
+                raise ValueError("Invalid API model record")
+            name, count = model.get("name"), model.get("request_count")
+            if (not isinstance(name, str) or not name.strip() or
+                    not isinstance(count, int) or isinstance(count, bool) or count < 0):
+                raise ValueError("Invalid API model name or request count")
+            models.append({"model": name, "requests": count, "share_pct": None})
         total = sum(m["requests"] for m in models)
         if total > 0:
             for m in models:
@@ -264,11 +306,11 @@ def _api_to_usage(api_data: dict) -> dict:
     session_models = _models(session)
     weekly_models = _models(weekly)
 
-    session_usage = session.get("usage", 0)
-    weekly_usage = weekly.get("usage", 0)
+    session_usage = session["usage"]
+    weekly_usage = weekly["usage"]
 
     data = {
-        "plan": _infer_plan(),  # API doesn't expose plan tier; infer from cookie/env
+        "plan": _infer_plan(html),  # Reuse the cookie attempt; do not fetch it twice.
         "session_used_pct": round(session_usage * 100, 1),
         "weekly_used_pct": round(weekly_usage * 100, 1),
         "session_reset": None,
@@ -306,9 +348,9 @@ def _load_manual_price_overrides() -> dict:
     """
     result = {"prices": {}, "tokens": {}}
     try:
-        if not PRICE_OVERRIDE_FILE.exists():
+        if not _profile_path(PRICE_OVERRIDE_FILE).exists():
             return result
-        data = json.loads(PRICE_OVERRIDE_FILE.read_text())
+        data = json.loads(_profile_path(PRICE_OVERRIDE_FILE).read_text())
 
         # Normalize the documented object form to the tuple used internally.
         # Also accept a 3-item list/tuple for backward compatibility.
@@ -384,26 +426,26 @@ def _resolve_api_prices() -> tuple[dict, str]:
         return merged, f"{source} + manual overrides"
 
     now = time.time()
-    if _prices_cache["prices"] and (now - _prices_cache["ts"]) < PRICE_CACHE_TTL_SECONDS:
-        return _with_manual(_prices_cache["prices"], _prices_cache["source"])
-    if PRICE_CACHE_FILE.exists():
+    if _prices_for_profile()["prices"] and (now - _prices_for_profile()["ts"]) < PRICE_CACHE_TTL_SECONDS:
+        return _with_manual(_prices_for_profile()["prices"], _prices_for_profile()["source"])
+    if _profile_path(PRICE_CACHE_FILE).exists():
         try:
-            cached = json.loads(PRICE_CACHE_FILE.read_text())
+            cached = json.loads(_profile_path(PRICE_CACHE_FILE).read_text())
             age = now - cached.get("fetched_at", 0)
             if age < PRICE_CACHE_TTL_SECONDS and cached.get("prices"):
-                _prices_cache["ts"] = now
-                _prices_cache["prices"] = cached["prices"]
-                _prices_cache["source"] = "OpenRouter (cached)"
+                _prices_for_profile()["ts"] = now
+                _prices_for_profile()["prices"] = cached["prices"]
+                _prices_for_profile()["source"] = "OpenRouter (cached)"
                 return _with_manual(cached["prices"], "OpenRouter (cached)")
         except (json.JSONDecodeError, OSError):
             pass
     try:
         live = _fetch_openrouter_prices()
-        _prices_cache["ts"] = now
-        _prices_cache["prices"] = live
-        _prices_cache["source"] = "OpenRouter (live)"
+        _prices_for_profile()["ts"] = now
+        _prices_for_profile()["prices"] = live
+        _prices_for_profile()["source"] = "OpenRouter (live)"
         try:
-            PRICE_CACHE_FILE.write_text(json.dumps(
+            _profile_path(PRICE_CACHE_FILE).write_text(json.dumps(
                 {"fetched_at": now, "prices": live}, indent=2))
         except OSError:
             pass
@@ -669,6 +711,10 @@ def _parse_usage(html: str) -> dict:
     result["weekly_models"] = weekly_segs
     result["models"] = session_segs  # backward-compat: session segments
 
+    result["plan"] = _infer_plan(html, result.get("plan"))
+    for key in ("session_used_pct", "weekly_used_pct"):
+        if result[key] is not None and not _valid_usage(result[key], 100):
+            raise ValueError("Invalid settings-page usage percentage")
     _enrich_with_costs(result)
     return result
 
@@ -1036,7 +1082,7 @@ def _real_token_averages() -> dict:
     may route calls to several models. Older Hermes schemas fall back to the
     aggregate ``sessions`` table.
     """
-    state_db = STATE_DB
+    state_db = _profile_path(STATE_DB)
     if not state_db.exists():
         return {}
     try:
@@ -1071,7 +1117,7 @@ def _real_token_averages() -> dict:
 
 def _real_global_token_average() -> tuple | None:
     """Request-weighted canonical average, modern schema first."""
-    state_db = STATE_DB
+    state_db = _profile_path(STATE_DB)
     if not state_db.exists():
         return None
     try:
@@ -1113,7 +1159,7 @@ def _real_provider_cache_hits() -> dict:
     When the same model was used via several providers, the rate from the
     provider with the most recorded calls wins (largest sample).
     """
-    state_db = STATE_DB
+    state_db = _profile_path(STATE_DB)
     if not state_db.exists():
         return {}
     try:
@@ -1219,12 +1265,12 @@ def _record_history(data: dict) -> None:
     if not week:
         return
     try:
-        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _profile_path(HISTORY_FILE).parent.mkdir(parents=True, exist_ok=True)
         # Dedupe: rewrite file without an existing record for this week,
         # keeping the latest snapshot per week (Ollama resets weekly).
         kept = []
-        if HISTORY_FILE.exists():
-            for line in HISTORY_FILE.read_text().splitlines():
+        if _profile_path(HISTORY_FILE).exists():
+            for line in _profile_path(HISTORY_FILE).read_text().splitlines():
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
@@ -1252,7 +1298,7 @@ def _record_history(data: dict) -> None:
             ],
         }
         kept.append(json.dumps(record))
-        HISTORY_FILE.write_text("\n".join(kept) + "\n")
+        _profile_path(HISTORY_FILE).write_text("\n".join(kept) + "\n")
         # NOTE: no trimming here — the full log is the lifetime source.
         # Display slicing to HISTORY_MAX_WEEKS happens in _history().
     except OSError as e:
@@ -1274,10 +1320,10 @@ def _record_session(data: dict) -> None:
         bucket_epoch = int(now.timestamp()) // (5 * 3600) * (5 * 3600)
         win = datetime.fromtimestamp(bucket_epoch, tz=timezone.utc).isoformat()
     try:
-        SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _profile_path(SESSION_FILE).parent.mkdir(parents=True, exist_ok=True)
         kept = []
-        if SESSION_FILE.exists():
-            for line in SESSION_FILE.read_text().splitlines():
+        if _profile_path(SESSION_FILE).exists():
+            for line in _profile_path(SESSION_FILE).read_text().splitlines():
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
@@ -1301,10 +1347,10 @@ def _record_session(data: dict) -> None:
             ],
         }
         kept.append(json.dumps(record))
-        SESSION_FILE.write_text("\n".join(kept) + "\n")
-        lines = SESSION_FILE.read_text().splitlines()
+        _profile_path(SESSION_FILE).write_text("\n".join(kept) + "\n")
+        lines = _profile_path(SESSION_FILE).read_text().splitlines()
         if len(lines) > SESSION_LOG_CAP:
-            SESSION_FILE.write_text("\n".join(lines[-SESSION_LOG_CAP:]) + "\n")
+            _profile_path(SESSION_FILE).write_text("\n".join(lines[-SESSION_LOG_CAP:]) + "\n")
     except OSError as e:
         logger.warning("Could not write session log: %s", e)
 
@@ -1317,8 +1363,8 @@ def _generate_report() -> str:
     Also generates per-month reports and a lifetime report.
     """
     weeks = []
-    if HISTORY_FILE.exists():
-        for line in HISTORY_FILE.read_text().splitlines():
+    if _profile_path(HISTORY_FILE).exists():
+        for line in _profile_path(HISTORY_FILE).read_text().splitlines():
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
@@ -1327,8 +1373,8 @@ def _generate_report() -> str:
     weeks.sort(key=lambda w: w.get("week") or "")
 
     sessions = []
-    if SESSION_FILE.exists():
-        for line in SESSION_FILE.read_text().splitlines():
+    if _profile_path(SESSION_FILE).exists():
+        for line in _profile_path(SESSION_FILE).read_text().splitlines():
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
@@ -1342,7 +1388,7 @@ def _generate_report() -> str:
     _write_monthly_reports(weeks, sessions)
     # Generate lifetime report
     _write_lifetime_report(weeks, sessions)
-    return str(REPORT_FILE)
+    return str(_profile_path(REPORT_FILE))
 
 
 def _write_main_report(weeks: list, sessions: list) -> None:
@@ -1384,14 +1430,14 @@ def _write_main_report(weeks: list, sessions: list) -> None:
     else:
         lines.append("_No session snapshots yet._")
         lines.append("")
-    REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_FILE.write_text("\n".join(lines))
+    _profile_path(REPORT_FILE).parent.mkdir(parents=True, exist_ok=True)
+    _profile_path(REPORT_FILE).write_text("\n".join(lines))
 
 
 def _write_monthly_reports(weeks: list, sessions: list) -> list:
     """Generate one MD file per month in ~/.hermes/ollama-usage-reports/.
     Returns list of {month, path} for the pane to link to."""
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    _profile_path(REPORTS_DIR).mkdir(parents=True, exist_ok=True)
 
     # Group weeks by month (week key is YYYY-MM-DD, month is YYYY-MM)
     months_w: dict[str, list] = {}
@@ -1453,7 +1499,7 @@ def _write_monthly_reports(weeks: list, sessions: list) -> list:
             lines.append("_No session snapshots._")
             lines.append("")
 
-        filepath = REPORTS_DIR / f"{month}.md"
+        filepath = _profile_path(REPORTS_DIR) / f"{month}.md"
         filepath.write_text("\n".join(lines))
         result.append({"month": month, "path": str(filepath)})
 
@@ -1511,8 +1557,8 @@ def _write_lifetime_report(weeks: list, sessions: list) -> str:
             lines.append(f"| {month} | {len(mw)} | {reqs} | {avg_used:.1f}% | ${cost:.2f} |")
         lines.append("")
 
-    filepath = REPORTS_DIR / "lifetime.md"
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    filepath = _profile_path(REPORTS_DIR) / "lifetime.md"
+    _profile_path(REPORTS_DIR).mkdir(parents=True, exist_ok=True)
     filepath.write_text("\n".join(lines))
     return str(filepath)
 
@@ -1561,10 +1607,10 @@ def _lifetime_from_records(weeks: list) -> dict:
 
 def _history() -> dict:
     """Aggregate weekly history for the pane (newest first, max 8 weeks)."""
-    if not HISTORY_FILE.exists():
+    if not _profile_path(HISTORY_FILE).exists():
         return {"ok": True, "weeks": []}
     weeks = []
-    for line in HISTORY_FILE.read_text().splitlines():
+    for line in _profile_path(HISTORY_FILE).read_text().splitlines():
         try:
             rec = json.loads(line)
         except json.JSONDecodeError:
@@ -1594,10 +1640,10 @@ def _history() -> dict:
 
 def _lifetime_stats() -> dict:
     """Aggregate all saved weekly records with current honest semantics."""
-    if not HISTORY_FILE.exists():
+    if not _profile_path(HISTORY_FILE).exists():
         return {"ok": True, "weeks_count": 0, "models": []}
     weeks = []
-    for line in HISTORY_FILE.read_text().splitlines():
+    for line in _profile_path(HISTORY_FILE).read_text().splitlines():
         try:
             weeks.append(json.loads(line))
         except json.JSONDecodeError:
@@ -1605,57 +1651,63 @@ def _lifetime_stats() -> dict:
     return _lifetime_from_records(weeks)
 
 
-def _fetch_usage() -> dict:
-    """Fetch Ollama Cloud usage — returns dict with data or error."""
-    now = time.time()
-    if _cache["data"] and (now - _cache["ts"]) < CACHE_TTL_SECONDS:
-        data = dict(_cache["data"])
-        data["cached"] = True
-        data["fetched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        return data
+def _fetch_error(exc: Exception) -> str:
+    """Never expose raw exceptions: their URLs/headers may contain credentials."""
+    if isinstance(exc, FileNotFoundError):
+        return "not configured"
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}"
+    if isinstance(exc, (ValueError, TypeError, KeyError)):
+        return "invalid usage data"
+    return "request failed"
 
-    # Primary: cookie scrape (has GPU-weighted bar widths).
-    try:
-        cookie = _load_cookie()
-        html = _fetch_settings_page(cookie)
-        data = _parse_usage(html)
-        if data.get("session_used_pct") is None or data.get("weekly_used_pct") is None:
-            raise ValueError("settings page did not contain usage limits")
-        data["cached"] = False
-        data["fetched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        data["ok"] = True
-        _cache["ts"] = now
-        _cache["data"] = data
+
+def _fetch_usage(force: bool = False) -> dict:
+    """Cookie first, API fallback; validate before caching or persistence."""
+    now = time.time()
+    cache = _cache_for_profile()
+    if not force and cache["data"] and (now - cache["ts"]) < CACHE_TTL_SECONDS:
+        return {**cache["data"], "cached": True}
+
+    def success(data: dict) -> dict:
+        for key in ("session_used_pct", "weekly_used_pct"):
+            if not _valid_usage(data.get(key), 100):
+                raise ValueError("Missing or invalid usage percentage")
+        data.update(cached=False, stale=False, fetched_at=_utc_now().isoformat(timespec="seconds"), ok=True)
+        cache.update(ts=now, data=data)
         _record_history(data)
         _record_session(data)
         return data
-    except FileNotFoundError:
-        pass  # no cookie file, try API
-    except Exception as e:
-        logger.warning("Cookie scrape failed (%s), trying API fallback", e)
 
-    # Fallback: official API (no GPU bar widths).
-    api_key = _load_api_key()
-    if api_key:
-        try:
-            api_data = _fetch_usage_api(api_key)
-            data = _api_to_usage(api_data)
-            data["cached"] = False
-            data["fetched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            data["ok"] = True
-            _cache["ts"] = now
-            _cache["data"] = data
-            _record_history(data)
-            _record_session(data)
-            return data
-        except Exception as e:
-            logger.warning("API fallback also failed: %s", e)
+    errors = {}
+    html = ""
+    try:
+        html = _fetch_settings_page(_load_cookie())
+        return success(_parse_usage(html))
+    except Exception as exc:
+        errors["cookie"] = _fetch_error(exc)
+        if not isinstance(exc, FileNotFoundError):
+            logger.warning("Cookie scrape failed (%s), trying API fallback", errors["cookie"])
 
-    return {
-        "ok": False,
+    try:
+        api_key = _load_api_key()
+        if api_key:
+            return success(_api_to_usage(_fetch_usage_api(api_key), html=html))
+        errors["api"] = "not configured"
+    except Exception as exc:
+        errors["api"] = _fetch_error(exc)
+        logger.warning("API fallback failed: %s", errors["api"])
+
+    failure = {
         "error": "fetch_failed",
-        "detail": "cookie expired or settings page changed",
+        "detail": "; ".join(f"{source}: {status}" for source, status in errors.items()),
+        "source_errors": errors,
     }
+    if cache["data"]:
+        cache["ts"] = 0  # Retry instead of presenting old data as a fresh cache hit.
+        # Keep the original acquisition timestamp. Failed reads never write history.
+        return {**cache["data"], **failure, "cached": True, "stale": True}
+    return {"ok": False, **failure}
 
 
 def _lifetime_break_even() -> dict:
@@ -1667,10 +1719,10 @@ def _lifetime_break_even() -> dict:
     lifetime section answers: over the whole recorded period, at what cache
     hit rate would the API have been cheaper for each model?
     """
-    if not HISTORY_FILE.exists():
+    if not _profile_path(HISTORY_FILE).exists():
         return {"ok": True, "weeks_count": 0, "models": []}
     weeks = []
-    for line in HISTORY_FILE.read_text().splitlines():
+    for line in _profile_path(HISTORY_FILE).read_text().splitlines():
         try:
             weeks.append(json.loads(line))
         except json.JSONDecodeError:
@@ -1830,9 +1882,8 @@ async def usage():
 @router.get("/usage/refresh")
 async def usage_refresh():
     """Force-refresh (bypass cache)."""
-    _cache["ts"] = 0
-    _cache["data"] = None
-    return _fetch_usage()
+    # Do not erase the last successful reading when a forced fetch fails.
+    return _fetch_usage(force=True)
 
 
 @router.get("/usage/history")
@@ -1858,14 +1909,14 @@ async def usage_report():
     """Generate (or refresh) all reports; returns paths."""
     _generate_report()
     # Build the response with monthly + lifetime paths
-    reports_dir = REPORTS_DIR
+    reports_dir = _profile_path(REPORTS_DIR)
     months = []
     if reports_dir.exists():
         for f in sorted(reports_dir.glob("*.md"), reverse=True):
             if f.name != "lifetime.md":
                 months.append({"month": f.stem, "path": str(f)})
     lifetime_path = str(reports_dir / "lifetime.md") if (reports_dir / "lifetime.md").exists() else None
-    return {"ok": True, "path": str(REPORT_FILE), "months": months, "lifetime_path": lifetime_path}
+    return {"ok": True, "path": str(_profile_path(REPORT_FILE)), "months": months, "lifetime_path": lifetime_path}
 
 
 @router.post("/usage/report/open")
@@ -1874,10 +1925,10 @@ async def usage_report_open():
     _generate_report()
     try:
         import subprocess as _sp
-        _sp.Popen(["open", str(REPORT_FILE)])
-        return {"ok": True, "path": str(REPORT_FILE), "opened": True}
+        _sp.Popen(["open", str(_profile_path(REPORT_FILE))])
+        return {"ok": True, "path": str(_profile_path(REPORT_FILE)), "opened": True}
     except (OSError, FileNotFoundError):
-        return {"ok": True, "path": str(REPORT_FILE), "opened": False}
+        return {"ok": True, "path": str(_profile_path(REPORT_FILE)), "opened": False}
 
 
 @router.post("/usage/report/open-month")
@@ -1900,8 +1951,7 @@ class _PlanBody(BaseModel):
 @router.get("/usage/plan")
 async def usage_get_plan():
     """Return the current plan tier and its source."""
-    plan = _infer_plan()
-    source = "default (Pro)" if plan is None else "config file"
+    plan, source = _plan_choice()
     return {"ok": True, "plan": plan or "Pro", "source": source}
 
 
@@ -1913,11 +1963,11 @@ async def usage_set_plan(body: _PlanBody):
         return {"ok": False, "error": "invalid_plan",
                 "detail": f"Must be one of: {', '.join(VALID_PLANS)}"}
     try:
-        PLAN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        PLAN_FILE.write_text(plan_lower + "\n")
+        _profile_path(PLAN_FILE).parent.mkdir(parents=True, exist_ok=True)
+        _profile_path(PLAN_FILE).write_text(plan_lower + "\n")
         # Invalidate cache so next fetch uses the new plan
-        _cache["ts"] = 0
-        _cache["data"] = None
+        _cache_for_profile()["ts"] = 0
+        _cache_for_profile()["data"] = None
         return {"ok": True, "plan": plan_lower.capitalize(),
                 "source": "config file"}
     except OSError as e:
