@@ -285,8 +285,39 @@ function Toggle({ label, checked, onChange }) {
   })
 }
 
+// Separate from section settings: never migrate/reset the user's section choices.
+const compactStores = new WeakMap()
+function compactStore(ctx) {
+  if (compactStores.has(ctx)) return compactStores.get(ctx)
+  const state = atom(true)
+  let revision = 0
+  let writes = Promise.resolve()
+  const store = {
+    state,
+    toggle() {
+      revision++
+      const next = !state.get()
+      state.set(next)
+      // Serialize writes so slow older saves cannot overwrite the latest toggle.
+      writes = writes.then(() => ctx.storage?.set?.('compactStatusBar', next))
+        .catch(() => host.notify({ kind: 'warning', message: 'Could not save Ollama status-bar setting' }))
+      return writes
+    }
+  }
+  compactStores.set(ctx, store)
+  try {
+    const loaded = ctx.storage?.get?.('compactStatusBar')
+    Promise.resolve(loaded).then(value => {
+      // A delayed initial read must not undo an interaction.
+      if (revision === 0 && typeof value === 'boolean') state.set(value)
+    }).catch(() => {})
+  } catch (_) { /* Keep the compact default if storage is unavailable. */ }
+  return store
+}
+
 // ── statusbar chip ────────────────────────────────────────────────────────
 function UsageChip({ ctx }) {
+  const compact = useValue(compactStore(ctx).state)
   const { data, isLoading, isError, error } = useUsage(ctx)
   const qc = useQueryClient()
   const pending = useRefreshPending(ctx)
@@ -296,21 +327,24 @@ function UsageChip({ ctx }) {
   const weekly = data?.weekly_used_pct
   const plan = data?.plan
 
-  let label = 'Ollama: …'
+  let label = compact ? '…' : 'Ollama: …'
   if (data) {
     if (data.ok === false) {
-      label = 'Ollama: n/a'
+      label = compact ? 'n/a' : 'Ollama: n/a'
     } else {
       const s = Number.isFinite(session) ? `${Math.round(session)}%` : 'n/a'
       const w = Number.isFinite(weekly) ? `${Math.round(weekly)}%` : 'n/a'
-      label = `Ollama${plan ? ' ' + plan : ''} · S ${s} / W ${w}${stale ? ' ⚠' : ''}`
+      label = `${compact ? `${s} / ${w}` : `Ollama${plan ? ' ' + plan : ''} · S ${s} / W ${w}`}${stale ? ' ⚠' : ''}`
     }
   } else if (failed || !isLoading) {
-    label = 'Ollama: n/a'
+    label = compact ? 'n/a' : 'Ollama: n/a'
   }
 
   const tooltip = [
     'Ollama Cloud',
+    `Plan: ${plan || 'unknown'}`,
+    `Session used: ${Number.isFinite(session) ? `${Math.round(session)}%` : 'n/a'}`,
+    `Weekly used: ${Number.isFinite(weekly) ? `${Math.round(weekly)}%` : 'n/a'}`,
     freshnessText(data, failed),
     `Fetched: ${data?.fetched_at || 'unknown'}`,
     pending ? 'Refreshing…' : null,
@@ -336,7 +370,7 @@ function UsageChip({ ctx }) {
       title: pending ? 'Refreshing Ollama Cloud usage…' : 'Ollama Cloud usage — click to refresh',
       disabled: pending,
       'aria-busy': pending,
-      'aria-label': `${label}, percentages used (session / weekly)`,
+      'aria-label': `Ollama Cloud ${plan || ''}, ${label}, percentages used (session / weekly)`,
       onClick: () => forceRefresh(ctx, qc),
       children: label
     })
@@ -345,6 +379,7 @@ function UsageChip({ ctx }) {
 
 // ── pane ──────────────────────────────────────────────────────────────────
 function UsagePane({ ctx }) {
+  const compact = useValue(compactStore(ctx).state)
   const scope = useQueryScope(ctx)
   const { data, isLoading, isError, error } = useUsage(ctx)
   const pending = useRefreshPending(ctx)
@@ -430,6 +465,11 @@ function UsagePane({ ctx }) {
       className: 'mt-2 border border-(--ui-stroke-secondary) rounded p-2 flex flex-col gap-0.5',
       children: [
         // Plan selector
+        jsx(Toggle, {
+          label: 'Compact status bar (percentages only)',
+          checked: compact,
+          onChange: () => compactStore(ctx).toggle()
+        }),
         jsxs('div', {
           className: 'flex items-center justify-between gap-2 py-1',
           children: [
@@ -1132,6 +1172,17 @@ export default {
   id: ID,
   name: 'Ollama Usage',
   register(ctx) {
+    compactStore(ctx)
+    ctx.register({
+      id: 'toggle-compact',
+      area: PALETTE_AREA,
+      data: {
+        id: 'ollama-usage.toggle-compact',
+        label: 'Toggle Ollama compact status bar',
+        keywords: ['ollama', 'usage', 'percentages', 'compact', 'status bar'],
+        run: () => compactStore(ctx).toggle()
+      }
+    })
 
     ctx.register({
       id: 'pane',

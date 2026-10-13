@@ -54,7 +54,7 @@ function button(tree, label) {
   return result[0]
 }
 
-function harness({ connectionAtom = true, source = 'ollama-test-source' } = {}) {
+function harness({ connectionAtom = true, source = 'ollama-test-source', storage = { get: () => null, set() {} } } = {}) {
   const profile = makeAtom('default')
   const connection = makeAtom('local')
   const cache = new Map(), overrides = new Map(), contributions = new Map()
@@ -86,7 +86,7 @@ function harness({ connectionAtom = true, source = 'ollama-test-source' } = {}) 
   const ctx = {
     source,
     register(contribution) { contributions.set(contribution.id, contribution) },
-    storage: { get: () => null, set() {} },
+    storage,
     os: { openExternal() {} },
     rest(path, options) {
       requests.push({ path, options: clean(options || {}), scope: scope() })
@@ -243,6 +243,63 @@ function harness({ connectionAtom = true, source = 'ollama-test-source' } = {}) 
   }
 }
 
+test('compact setting persists independently, shares reactive state, and identifies usage in tooltip', async () => {
+  const values = new Map([['compactStatusBar', false]])
+  const writes = []
+  const storage = { get: key => values.get(key), set(key, value) { writes.push([key, value]); values.set(key, value) } }
+  const h = harness({ storage })
+  h.seed(FRESH)
+  const chip = h.mount('chip')
+  await Promise.resolve()
+  assert.equal(text(chip.render()), 'Ollama Pro · S 12% / W 35%')
+  await h.contributions.get('toggle-compact').data.run()
+  assert.equal(text(chip.render()), '12% / 35%')
+  const tooltip = chip.tree.props.label.props.children
+  for (const detail of ['Ollama Cloud', 'Plan: Pro', 'Session used: 12%', 'Weekly used: 35%', 'Session resets 2h', 'Weekly resets 3d']) assert.ok(tooltip.includes(detail))
+  assert.deepEqual(writes, [['compactStatusBar', true]])
+  const pane = h.mount('pane')
+  button(pane.tree, '⚙').props.onClick()
+  pane.render()
+  const compactToggle = () => nodes(pane.tree, node => node.type === 'button' && text(node).includes('Compact status bar'))[0]
+  assert.equal(compactToggle().props['aria-pressed'], true)
+  await compactToggle().props.onClick()
+  pane.render()
+  assert.equal(compactToggle().props['aria-pressed'], false)
+  assert.equal(text(chip.render()), 'Ollama Pro · S 12% / W 35%')
+  assert.deepEqual(writes, [['compactStatusBar', true], ['compactStatusBar', false]])
+  const reload = harness({ storage })
+  reload.seed(FRESH)
+  await Promise.resolve()
+  assert.equal(text(reload.mount('chip').tree), 'Ollama Pro · S 12% / W 35%')
+})
+
+test('compact async initialization cannot undo toggles and writes are ordered', async () => {
+  const read = deferred(), firstWrite = deferred(), writes = []
+  const h = harness({ storage: {
+    get: key => key === 'compactStatusBar' ? read.promise : null,
+    set(key, value) { writes.push([key, value]); return writes.length === 1 ? firstWrite.promise : Promise.resolve() }
+  } })
+  h.seed(FRESH)
+  const chip = h.mount('chip')
+  const toggle = h.contributions.get('toggle-compact').data.run
+  const one = toggle(), two = toggle()
+  read.resolve(false)
+  await Promise.resolve()
+  assert.equal(text(chip.render()), '12% / 35%')
+  assert.deepEqual(writes, [['compactStatusBar', false]])
+  firstWrite.resolve()
+  await Promise.all([one, two])
+  assert.deepEqual(writes, [['compactStatusBar', false], ['compactStatusBar', true]])
+})
+
+test('compact storage failures are handled without breaking the chip', async () => {
+  const h = harness({ storage: { get() { throw Error('read') }, set() { return Promise.reject(Error('write')) } } })
+  h.seed(FRESH)
+  await h.contributions.get('toggle-compact').data.run()
+  assert.equal(text(h.mount('chip').tree), 'Ollama Pro · S 12% / W 35%')
+  assert.equal(h.notifications[0].kind, 'warning')
+})
+
 function assertRefreshRequest(h, expectedScope = h.scope()) {
   assert.equal(h.forcedRequests().length, 1)
   const request = h.forcedRequests()[0]
@@ -306,7 +363,7 @@ for (const id of ['chip', 'pane', 'palette']) {
     assertWarning(h, failure.detail)
     assert.match(text(h.mount('pane').tree), /Usage API returned HTTP 503/)
     const chip = h.mount('chip').tree
-    assert.match(text(chip), /Ollama: n\/a/)
+    assert.match(text(chip), /^n\/a$/)
     assert.match(chip.props.label.props.children, /Usage API returned HTTP 503/)
   })
 
@@ -389,7 +446,7 @@ for (const [label, state, snapshot] of [
     h.setQueryState(state)
     const chip = h.mount('chip').tree
     assert.match(text(chip), /⚠$/)
-    assert.match(text(chip), /S 12% \/ W 35%/)
+    assert.match(text(chip), /12% \/ 35%/)
     const labelNode = chip.props.label
     assert.equal(labelNode.type, 'span')
     assert.equal(typeof labelNode.props.children, 'string', 'Exactly one flat text child')
@@ -414,7 +471,7 @@ test('status chip matches Codex typography, spacing, colors and compact label la
   h.seed(FRESH)
   const chip = h.mount('chip').tree
   const control = nodes(chip, node => node.type === 'button')[0]
-  assert.equal(text(control), 'Ollama Pro · S 12% / W 35%')
+  assert.equal(text(control), '12% / 35%')
   assert.deepEqual(clean(control.props.style), {
     height: '100%', padding: '0 6px', fontSize: '11px', whiteSpace: 'nowrap',
     color: 'var(--ui-text-secondary)'
@@ -423,10 +480,10 @@ test('status chip matches Codex typography, spacing, colors and compact label la
   assert.match(control.props['aria-label'], /percentages used \(session \/ weekly\)/)
   h.seed({ ...FRESH, stale: true })
   const staleControl = nodes(h.mount('chip').tree, node => node.type === 'button')[0]
-  assert.equal(text(staleControl), 'Ollama Pro · S 12% / W 35% ⚠')
+  assert.equal(text(staleControl), '12% / 35% ⚠')
   assert.equal(staleControl.props.style.color, 'var(--ui-badge-warning)')
   h.seed({ ...FRESH, plan: null, session_used_pct: null, weekly_used_pct: null })
-  assert.equal(text(h.mount('chip').tree), 'Ollama · S n/a / W n/a')
+  assert.equal(text(h.mount('chip').tree), 'n/a / n/a')
 })
 
 test('fresh/cached tooltip reports the original fetched timestamp without a stale warning', () => {
@@ -445,7 +502,7 @@ test('connection failure without data renders unavailable rather than an endless
   const h = harness()
   h.setQueryState({ isLoading: false, isError: true, error: new Error('private-error') })
   const chip = h.mount('chip').tree
-  assert.match(text(chip), /Ollama: n\/a/)
+  assert.match(text(chip), /^n\/a$/)
   assert.match(chip.props.label.props.children, /Freshness: unavailable/)
   assert.match(chip.props.label.props.children, /Fetched: unknown/)
   assert.match(text(h.mount('pane').tree), /Could not reach the Ollama usage backend/)
